@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Push Channel Client</title>
+  <script src="./sdk.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 20px;
+    }
+
+    #messages {
+      list-style-type: none;
+      padding: 0;
+      border: 1px solid #ccc;
+      height: 300px;
+      overflow-y: scroll;
+      margin-bottom: 10px;
+    }
+
+    #messages li {
+      padding: 5px 10px;
+      border-bottom: 1px solid #eee;
+    }
+
+    #messages li:last-child {
+      border-bottom: none;
+    }
+
+    .input-group {
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+
+<body>
+  <h2>Push Channel Client</h2>
+
+  <div class="input-group">
+    <label for="sessionId">Session ID:</label>
+    <input id="sessionId" value="user-123" />
+    <button onclick="connect()">Connect</button>
+    <button onclick="loginAndFill()">Login</button>
+  </div>
+
+  <div id="chat" style="display:none;">
+    <ul id="messages"></ul>
+    <div class="input-group">
+      <input id="input" autocomplete="off" placeholder="Type a message..." />
+      <button onclick="send()">Send</button>
+    </div>
+  </div>
+
+  <script>
+    var sessionId;
+    var sdk = new window.PushChannelSDK({ middlewareUrl: "http://localhost:3001", socketUrl: "http://localhost:3001" });
+
+    function connect() {
+      sessionId = document.getElementById('sessionId').value;
+      if (!sessionId) return alert("Please enter Session ID");
+
+      sdk.connect(sessionId, {
+        onConnect: function (id) {
+          document.getElementById('chat').style.display = 'block';
+          addMessage("System", "Connected as " + id);
+        },
+        onMessage: function (msg) {
+          addMessage(msg.from || "Bot", msg.content);
+        },
+        onDisconnect: function () {
+          addMessage("System", "Disconnected");
+        }
+      });
+    }
+
+    async function loginAndFill() {
+      try {
+        var res = await sdk.loginWithPrompt();
+        document.getElementById('sessionId').value = res.sessionId;
+        addMessage("System", "Logged in, sessionId: " + res.sessionId);
+      } catch (err) {
+        alert(err && err.message ? err.message : "Login failed");
+      }
+    }
+
+    function send() {
+      var input = document.getElementById('input');
+      var value = input.value;
+      if (value) {
+        sdk.send(value);
+        addMessage("Me", value);
+        input.value = '';
+      }
+    }
+
+    function addMessage(sender, text) {
+      var item = document.createElement('li');
+      item.textContent = sender + ": " + text;
+      document.getElementById('messages').appendChild(item);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+  </script>
+</body>
+
+</html>

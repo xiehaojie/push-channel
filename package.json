@@ -1,0 +1,22 @@
+
+{
+  "name": "push-channel",
+  "version": "0.0.1",
+  "description": "Push channel plugin for OpenClaw",
+  "main": "index.ts",
+  "type": "module",
+  "dependencies": {},
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "push-channel",
+      "label": "Push Channel",
+      "selectionLabel": "Push Channel (Custom)",
+      "docsPath": "/channels/push-channel",
+      "docsLabel": "push-channel",
+      "blurb": "Custom push channel with middleware."
+    }
+  }
+}

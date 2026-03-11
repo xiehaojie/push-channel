@@ -1,0 +1,10 @@
+
+{
+  "id": "push-channel",
+  "channels": ["push-channel"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
