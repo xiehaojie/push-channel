@@ -120,7 +120,7 @@ app.post('/auth', (req, res) => {
 });
 
 // Endpoint for OpenClaw to push messages
-app.post('/send', (req, res) => {
+app.post('/send', async (req, res) => {
     const { sessionId, content } = req.body;
     console.log(`Received push request for ${sessionId}: ${content}`);
     
@@ -130,8 +130,44 @@ app.post('/send', (req, res) => {
 
     const socket = sessions.get(sessionId);
     if (socket) {
-        socket.send(JSON.stringify({ type: "message", content, from: 'OpenClaw' }));
-        console.log(`Sent message to ${sessionId}`);
+        // Simulate streaming
+        const chunkSize = 5; // Characters per chunk
+        const delay = 50; // ms between chunks
+        
+        // Initial empty message to set up the UI (optional, but good for "typing..." indicator if we had one)
+        // But here we just stream chunks
+        
+        let currentIndex = 0;
+        
+        // Send stream start if needed, but our client handles "stream" type by appending
+        // If we want to show "OpenClaw" as sender, we should probably start with a message header or just use the same logic
+        // The client logic:
+        // if (msg.type === 'stream') { append... }
+        // else { addMessage... }
+        
+        // Problem: 'stream' type in client doesn't have 'from' field usage in the append logic (it uses currentStreamItem)
+        // We need to initialize currentStreamItem with the correct sender.
+        // But client code: if (!currentStreamItem) { currentStreamItem = addMessage("Bot", "", true); }
+        // It defaults to "Bot".
+        
+        const streamLoop = async () => {
+            // Send stream start
+            socket.send(JSON.stringify({ type: "stream_start", from: 'OpenClaw' }));
+
+            let currentIndex = 0;
+            while (currentIndex < content.length) {
+                const chunk = content.slice(currentIndex, currentIndex + chunkSize);
+                socket.send(JSON.stringify({ type: "stream", content: chunk }));
+                currentIndex += chunkSize;
+                await new Promise(r => setTimeout(r, delay));
+            }
+            socket.send(JSON.stringify({ type: "stream_end" }));
+        };
+        
+        // Don't await the stream loop so we can respond to the HTTP request immediately
+        streamLoop().catch(err => console.error("Streaming failed", err));
+
+        console.log(`Started streaming message to ${sessionId}`);
         res.status(200).send("Sent");
     } else {
         console.log(`Session ${sessionId} not found`);

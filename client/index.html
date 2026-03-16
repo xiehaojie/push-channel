@@ -66,7 +66,22 @@
           addMessage("System", "Connected as " + id);
         },
         onMessage: function (msg) {
-          addMessage(msg.from || "Bot", msg.content);
+          if (msg.type === 'stream_start') {
+             // End any previous stream just in case
+             currentStreamItem = null;
+             // Start new stream with provided sender
+             currentStreamItem = addMessage(msg.from || "Bot", "", true);
+          } else if (msg.type === 'stream') {
+            if (!currentStreamItem) {
+              currentStreamItem = addMessage("Bot", "", true);
+            }
+            currentStreamItem.textContent += msg.content;
+            window.scrollTo(0, document.body.scrollHeight);
+          } else if (msg.type === 'stream_end') {
+            currentStreamItem = null;
+          } else {
+            addMessage(msg.from || "Bot", msg.content);
+          }
         },
         onDisconnect: function () {
           addMessage("System", "Disconnected");
@@ -94,11 +109,12 @@
       }
     }
 
-    function addMessage(sender, text) {
+    function addMessage(sender, text, returnElement) {
       var item = document.createElement('li');
       item.textContent = sender + ": " + text;
       document.getElementById('messages').appendChild(item);
       window.scrollTo(0, document.body.scrollHeight);
+      if (returnElement) return item;
     }
   </script>
 </body>
