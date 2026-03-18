@@ -1,0 +1,1 @@
+ALTER TABLE users ADD COLUMN session_id VARCHAR(128) UNIQUE COMMENT 'Fixed Session ID';
