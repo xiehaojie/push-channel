@@ -15,7 +15,8 @@ class PushChannelSDK {
     }
 
     connect() {
-        this.socket = new WebSocket(this.url);
+        const wsUrl = this._toWebSocketUrl(this.url);
+        this.socket = new WebSocket(wsUrl);
 
         this.socket.onopen = () => {
             console.log('Connected to server');
@@ -46,6 +47,8 @@ class PushChannelSDK {
                     this.callbacks.streamEnd();
                 } else if (data.type === 'message' && this.callbacks.message) {
                     this.callbacks.message(data.content);
+                } else if (data.type === 'done' && this.callbacks.streamEnd) {
+                    this.callbacks.streamEnd();
                 }
             } catch (err) {
                 console.error('Error parsing message', err);
@@ -64,9 +67,13 @@ class PushChannelSDK {
         };
     }
 
-    sendMessage(content) {
+    sendMessage(content, agentId) {
         if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({ type: 'message', content }));
+            const payload = { type: 'message', content };
+            if (agentId) {
+                payload.agentId = agentId;
+            }
+            this.socket.send(JSON.stringify(payload));
         } else {
             console.error('Socket is not open');
         }
@@ -103,5 +110,16 @@ class PushChannelSDK {
 
     onClose(callback) {
         this.callbacks.close = callback;
+    }
+
+    _toWebSocketUrl(url) {
+        try {
+            const parsed = new URL(url);
+            if (parsed.protocol === 'http:') parsed.protocol = 'ws:';
+            else if (parsed.protocol === 'https:') parsed.protocol = 'wss:';
+            return parsed.toString();
+        } catch {
+            return url;
+        }
     }
 }

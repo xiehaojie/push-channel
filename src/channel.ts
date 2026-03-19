@@ -42,13 +42,14 @@ export const pushChannelPlugin: ChannelPlugin<ResolvedPushChannelAccount> = {
     listAccountIds: () => ["default"],
     resolveAccount: (cfg, accountId) => {
         const c = (cfg.channels?.["push-channel"] as any) || {};
-        return {
+        const account = {
             accountId: "default",
             enabled: c.enabled ?? false,
             configured: !!c.middlewareUrl,
             name: "Push Channel",
             config: c,
         };
+        return account;
     },
     defaultAccountId: () => "default",
     setAccountEnabled: () => { throw new Error("Not implemented"); },

@@ -8,20 +8,45 @@
 </head>
 <body>
     <div id="app">
-        <div id="login-container">
-            <h2>Login</h2>
+        <!-- Auth panel -->
+        <div id="auth-container">
+            <h2 id="auth-title">Login</h2>
+            <div class="tab-bar">
+                <button id="tab-login" class="tab active" onclick="switchTab('login')">Login</button>
+                <button id="tab-register" class="tab" onclick="switchTab('register')">Register</button>
+            </div>
+
+            <!-- Login form -->
             <form id="login-form">
-                <input type="text" id="username" placeholder="Username" required>
-                <input type="password" id="password" placeholder="Password" required>
+                <input type="text" id="login-username" placeholder="Username" required>
+                <input type="password" id="login-password" placeholder="Password" required>
                 <button type="submit">Login</button>
             </form>
-            <p id="login-error" class="error"></p>
+
+            <!-- Register form -->
+            <form id="register-form" style="display:none;">
+                <input type="text" id="reg-username" placeholder="Username" required>
+                <input type="password" id="reg-password" placeholder="Password" required>
+                <input type="text" id="reg-name" placeholder="Display name" required>
+                <input type="email" id="reg-email" placeholder="Email" required>
+                <button type="submit">Register</button>
+            </form>
+
+            <p id="auth-error" class="error"></p>
         </div>
 
+        <!-- Chat panel -->
         <div id="chat-container" style="display: none;">
             <div id="chat-header">
-                <h2>Chat Session: <span id="session-display"></span></h2>
-                <button id="logout-btn">Logout</button>
+                <div class="header-left">
+                    <h2>OpenClaw Chat</h2>
+                    <span id="session-display" class="session-label"></span>
+                </div>
+                <div class="header-right">
+                    <label for="agent-id-input">Agent:</label>
+                    <input type="text" id="agent-id-input" placeholder="default">
+                    <button id="logout-btn">Logout</button>
+                </div>
             </div>
             <div id="messages"></div>
             <form id="message-form">
@@ -30,79 +55,109 @@
             </form>
         </div>
     </div>
-    
+
     <script src="sdk.js"></script>
     <script>
-        const API_URL = 'http://localhost:3001/api';
+        const API_BASE = 'http://localhost:3001';
         let sdk = null;
 
-        const loginForm = document.getElementById('login-form');
-        const loginError = document.getElementById('login-error');
-        const loginContainer = document.getElementById('login-container');
+        const authError = document.getElementById('auth-error');
+        const authContainer = document.getElementById('auth-container');
         const chatContainer = document.getElementById('chat-container');
         const sessionDisplay = document.getElementById('session-display');
         const messagesDiv = document.getElementById('messages');
         const messageForm = document.getElementById('message-form');
         const messageInput = document.getElementById('message-input');
-        const logoutBtn = document.getElementById('logout-btn');
+        const agentIdInput = document.getElementById('agent-id-input');
 
-        loginForm.addEventListener('submit', async (e) => {
+        function switchTab(tab) {
+            document.getElementById('login-form').style.display = tab === 'login' ? '' : 'none';
+            document.getElementById('register-form').style.display = tab === 'register' ? '' : 'none';
+            document.getElementById('tab-login').classList.toggle('active', tab === 'login');
+            document.getElementById('tab-register').classList.toggle('active', tab === 'register');
+            document.getElementById('auth-title').textContent = tab === 'login' ? 'Login' : 'Register';
+            authError.textContent = '';
+        }
+
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-
+            authError.textContent = '';
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
             try {
-                const res = await fetch(`${API_URL}/auth/login`, {
+                const res = await fetch(`${API_BASE}/api/auth/login`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username, password })
                 });
-                
                 const data = await res.json();
-                
                 if (data.success) {
-                    const sessionId = data.data.sessionId;
-                    startChat(sessionId);
+                    startChat(data.data.sessionId);
                 } else {
-                    loginError.textContent = data.message || 'Login failed';
+                    authError.textContent = data.message || 'Login failed';
                 }
-            } catch (err) {
-                loginError.textContent = 'Network error';
+            } catch {
+                authError.textContent = 'Network error';
+            }
+        });
+
+        document.getElementById('register-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            authError.textContent = '';
+            const username = document.getElementById('reg-username').value;
+            const password = document.getElementById('reg-password').value;
+            const name = document.getElementById('reg-name').value;
+            const email = document.getElementById('reg-email').value;
+            try {
+                const res = await fetch(`${API_BASE}/api/auth/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, name, email })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    startChat(data.data.sessionId);
+                } else {
+                    authError.textContent = data.message || 'Registration failed';
+                }
+            } catch {
+                authError.textContent = 'Network error';
             }
         });
 
         function startChat(sessionId) {
-            loginContainer.style.display = 'none';
+            authContainer.style.display = 'none';
             chatContainer.style.display = 'flex';
-            sessionDisplay.textContent = sessionId;
+            sessionDisplay.textContent = sessionId.slice(0, 8) + '…';
 
-            sdk = new PushChannelSDK('ws://localhost:3001', sessionId);
-            
-            sdk.onMessage((msg) => {
-                appendMessage('Bot', msg);
-            });
+            sdk = new PushChannelSDK(`${API_BASE}`, sessionId);
+
+            sdk.onMessage((msg) => appendMessage('Bot', msg));
 
             sdk.onStreamStart((from) => {
                 const div = document.createElement('div');
                 div.className = 'message bot stream-active';
-                div.innerHTML = `<strong>${from}:</strong> <span class="content"></span>`;
+                div.innerHTML = `<strong>${from || 'Assistant'}:</strong> <span class="content"></span>`;
                 messagesDiv.appendChild(div);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
             });
 
             sdk.onStreamChunk((chunk) => {
-                const activeStream = messagesDiv.querySelector('.stream-active .content');
-                if (activeStream) {
-                    activeStream.textContent += chunk;
-                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                let activeStream = messagesDiv.querySelector('.stream-active .content');
+                if (!activeStream) {
+                    const div = document.createElement('div');
+                    div.className = 'message bot stream-active';
+                    div.innerHTML = `<strong>Assistant:</strong> <span class="content"></span>`;
+                    messagesDiv.appendChild(div);
+                    activeStream = div.querySelector('.content');
                 }
+                activeStream.textContent += chunk;
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
             });
 
             sdk.onStreamEnd(() => {
-                const activeStream = messagesDiv.querySelector('.stream-active');
-                if (activeStream) {
-                    activeStream.classList.remove('stream-active');
-                }
+                const active = messagesDiv.querySelector('.stream-active');
+                if (active) active.classList.remove('stream-active');
             });
 
             sdk.connect();
@@ -111,26 +166,24 @@
         messageForm.addEventListener('submit', (e) => {
             e.preventDefault();
             const text = messageInput.value.trim();
+            const agentId = agentIdInput.value.trim() || undefined;
             if (text && sdk) {
                 appendMessage('You', text);
-                sdk.sendMessage(text);
+                sdk.sendMessage(text, agentId);
                 messageInput.value = '';
             }
         });
 
-        logoutBtn.addEventListener('click', () => {
-            if (sdk) {
-                sdk.disconnect();
-                sdk = null;
-            }
-            loginContainer.style.display = 'block';
+        document.getElementById('logout-btn').addEventListener('click', () => {
+            if (sdk) { sdk.disconnect(); sdk = null; }
             chatContainer.style.display = 'none';
+            authContainer.style.display = '';
             messagesDiv.innerHTML = '';
         });
 
         function appendMessage(sender, text) {
             const div = document.createElement('div');
-            div.className = `message ${sender.toLowerCase()}`;
+            div.className = `message ${sender === 'You' ? 'you' : 'bot'}`;
             div.innerHTML = `<strong>${sender}:</strong> <span>${text}</span>`;
             messagesDiv.appendChild(div);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;

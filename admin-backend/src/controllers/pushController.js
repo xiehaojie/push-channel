@@ -24,12 +24,12 @@ class PushController {
             const delay = 50;
 
             const streamLoop = async () => {
-                socket.send(JSON.stringify({ type: "stream_start", from: 'OpenClaw' }));
+                socket.send(JSON.stringify({ type: "stream_start", from: 'Assistant' }));
 
                 let currentIndex = 0;
                 while (currentIndex < content.length) {
                     const chunk = content.slice(currentIndex, currentIndex + chunkSize);
-                    socket.send(JSON.stringify({ type: "stream", content: chunk }));
+                    socket.send(JSON.stringify({ type: "stream", content: chunk, role: 'assistant' }));
                     currentIndex += chunkSize;
                     await new Promise(r => setTimeout(r, delay));
                 }
