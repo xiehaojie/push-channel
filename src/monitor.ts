@@ -148,7 +148,7 @@ async function handleIncomingMessage(cfg: ClawdbotConfig, runtime: RuntimeEnv, a
     
     const sessionKey = `agent:${agentId}:channel:${channelId}:${peerKind}:${peerId}`;
     
-    const streaming = res ? createStreamingReplyDispatcher(res) : null;
+    const streaming = res ? createStreamingReplyDispatcher(res, sessionKey) : null;
     const dispatcher = streaming
         ? streaming.dispatcher
         : createPushChannelReplyDispatcher({

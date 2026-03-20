@@ -134,6 +134,16 @@ button:hover {
     flex-shrink: 0;
 }
 
+.tool-status {
+    font-size: 0.78em;
+    background: rgba(255, 193, 7, 0.18);
+    color: #fff7cc;
+    border: 1px solid rgba(255, 243, 205, 0.5);
+    border-radius: 999px;
+    padding: 3px 8px;
+    white-space: nowrap;
+}
+
 .header-right label {
     font-size: 0.85em;
     white-space: nowrap;
@@ -201,6 +211,42 @@ button:hover {
     background: #e9ecef;
     color: #333;
     margin-right: auto;
+}
+
+.message.system {
+    background: #fff3cd;
+    color: #856404;
+    margin: 0 auto;
+    max-width: 100%;
+    font-size: 0.86em;
+    text-align: center;
+}
+
+/* Tool call cards */
+.message.tool-call {
+    background: #f0f4ff;
+    border: 1px solid #b8d0ff;
+    color: #1a3a7a;
+    text-align: left;
+    font-size: 0.85em;
+    max-width: 90%;
+    margin: 0 auto;
+}
+
+.message.tool-call.tool-done {
+    background: #edfff4;
+    border-color: #a3e6c3;
+    color: #155724;
+}
+
+.tool-args {
+    margin: 4px 0 0;
+    font-size: 0.82em;
+    background: rgba(0,0,0,0.04);
+    border-radius: 4px;
+    padding: 4px 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .message.stream-active {

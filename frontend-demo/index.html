@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenClaw Push Channel Demo</title>
     <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
     <div id="app">
         <!-- Auth panel -->
@@ -43,6 +45,7 @@
                     <span id="session-display" class="session-label"></span>
                 </div>
                 <div class="header-right">
+                    <span id="tool-status" class="tool-status" style="display:none;">🛠️ Tools running...</span>
                     <label for="agent-id-input">Agent:</label>
                     <input type="text" id="agent-id-input" placeholder="default">
                     <button id="logout-btn">Logout</button>
@@ -69,6 +72,13 @@
         const messageForm = document.getElementById('message-form');
         const messageInput = document.getElementById('message-input');
         const agentIdInput = document.getElementById('agent-id-input');
+        const toolStatus = document.getElementById('tool-status');
+        let isToolRunning = false;
+
+        function updateToolStatus() {
+            if (!toolStatus) return;
+            toolStatus.style.display = isToolRunning ? 'inline-flex' : 'none';
+        }
 
         function switchTab(tab) {
             document.getElementById('login-form').style.display = tab === 'login' ? '' : 'none';
@@ -160,6 +170,45 @@
                 if (active) active.classList.remove('stream-active');
             });
 
+            sdk.onToolCall((toolCallId, toolName, args) => {
+                const div = document.createElement('div');
+                div.className = 'message system tool-call';
+                div.dataset.toolCallId = toolCallId;
+                const argsStr = args && Object.keys(args).length > 0
+                    ? JSON.stringify(args, null, 2)
+                    : '(no args)';
+                div.innerHTML = `<span>🛠️ <strong>${toolName}</strong><pre class="tool-args">${argsStr}</pre></span>`;
+                messagesDiv.appendChild(div);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            });
+
+            sdk.onToolResult((toolCallId) => {
+                const card = messagesDiv.querySelector(`.tool-call[data-tool-call-id="${CSS.escape(toolCallId)}"]`);
+                if (card) {
+                    card.classList.add('tool-done');
+                    const strong = card.querySelector('strong');
+                    if (strong) strong.insertAdjacentText('beforebegin', '✅ ');
+                    const spinner = card.querySelector('.spinner');
+                    if (spinner) spinner.remove();
+                }
+            });
+
+            sdk.onToolStart(() => {
+                isToolRunning = true;
+                updateToolStatus();
+                appendSystemMessage('🛠️ 工具执行中，结果会在后续推送。');
+            });
+
+            sdk.onToolEnd(() => {
+                isToolRunning = false;
+                updateToolStatus();
+                appendSystemMessage('✅ 工具执行完成。');
+            });
+
+            sdk.onTimeoutDeferred((msg) => {
+                appendSystemMessage(msg || '工具仍在执行，已忽略本次超时提示，等待后续通知。');
+            });
+
             sdk.connect();
         }
 
@@ -176,6 +225,8 @@
 
         document.getElementById('logout-btn').addEventListener('click', () => {
             if (sdk) { sdk.disconnect(); sdk = null; }
+            isToolRunning = false;
+            updateToolStatus();
             chatContainer.style.display = 'none';
             authContainer.style.display = '';
             messagesDiv.innerHTML = '';
@@ -188,6 +239,15 @@
             messagesDiv.appendChild(div);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
+
+        function appendSystemMessage(text) {
+            const div = document.createElement('div');
+            div.className = 'message system';
+            div.innerHTML = `<span>${text}</span>`;
+            messagesDiv.appendChild(div);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
     </script>
 </body>
+
 </html>

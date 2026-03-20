@@ -1,125 +1,160 @@
 class PushChannelSDK {
-    constructor(url, sessionId) {
-        this.url = url;
-        this.sessionId = sessionId;
-        this.socket = null;
-        this.callbacks = {
-            message: null,
-            streamStart: null,
-            streamChunk: null,
-            streamEnd: null,
-            error: null,
-            close: null
-        };
-        this.pingInterval = null;
-    }
+  constructor(url, sessionId) {
+    this.url = url;
+    this.sessionId = sessionId;
+    this.socket = null;
+    this.callbacks = {
+      message: null,
+      streamStart: null,
+      streamChunk: null,
+      streamEnd: null,
+      toolStart: null,
+      toolEnd: null,
+      toolCall: null,
+      toolResult: null,
+      timeoutDeferred: null,
+      error: null,
+      close: null,
+    };
+    this.pingInterval = null;
+  }
 
-    connect() {
-        const wsUrl = this._toWebSocketUrl(this.url);
-        this.socket = new WebSocket(wsUrl);
+  connect() {
+    const wsUrl = this._toWebSocketUrl(this.url);
+    this.socket = new WebSocket(wsUrl);
 
-        this.socket.onopen = () => {
-            console.log('Connected to server');
-            this.socket.send(JSON.stringify({ type: 'register', sessionId: this.sessionId }));
-            
-            // Start heartbeat
-            this.pingInterval = setInterval(() => {
-                if (this.socket.readyState === WebSocket.OPEN) {
-                    this.socket.send(JSON.stringify({ type: 'ping' }));
-                }
-            }, 30000);
-        };
+    this.socket.onopen = () => {
+      console.log("Connected to server");
+      this.socket.send(JSON.stringify({ type: "register", sessionId: this.sessionId }));
 
-        this.socket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                
-                if (data.type === 'pong') {
-                    // Heartbeat received
-                    return;
-                }
-
-                if (data.type === 'stream_start' && this.callbacks.streamStart) {
-                    this.callbacks.streamStart(data.from);
-                } else if (data.type === 'stream' && this.callbacks.streamChunk) {
-                    this.callbacks.streamChunk(data.content);
-                } else if (data.type === 'stream_end' && this.callbacks.streamEnd) {
-                    this.callbacks.streamEnd();
-                } else if (data.type === 'message' && this.callbacks.message) {
-                    this.callbacks.message(data.content);
-                } else if (data.type === 'done' && this.callbacks.streamEnd) {
-                    this.callbacks.streamEnd();
-                }
-            } catch (err) {
-                console.error('Error parsing message', err);
-            }
-        };
-
-        this.socket.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            if (this.callbacks.error) this.callbacks.error(error);
-        };
-
-        this.socket.onclose = () => {
-            console.log('Disconnected from server');
-            if (this.pingInterval) clearInterval(this.pingInterval);
-            if (this.callbacks.close) this.callbacks.close();
-        };
-    }
-
-    sendMessage(content, agentId) {
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            const payload = { type: 'message', content };
-            if (agentId) {
-                payload.agentId = agentId;
-            }
-            this.socket.send(JSON.stringify(payload));
-        } else {
-            console.error('Socket is not open');
+      // Start heartbeat
+      this.pingInterval = setInterval(() => {
+        if (this.socket.readyState === WebSocket.OPEN) {
+          this.socket.send(JSON.stringify({ type: "ping" }));
         }
-    }
+      }, 30000);
+    };
 
-    disconnect() {
-        if (this.socket) {
-            this.socket.close();
+    this.socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "pong") {
+          // Heartbeat received
+          return;
         }
-        if (this.pingInterval) {
-            clearInterval(this.pingInterval);
+
+        if (data.type === "stream_start" && this.callbacks.streamStart) {
+          this.callbacks.streamStart(data.from);
+        } else if (data.type === "stream" && this.callbacks.streamChunk) {
+          this.callbacks.streamChunk(data.content);
+        } else if (data.type === "stream_end" && this.callbacks.streamEnd) {
+          this.callbacks.streamEnd();
+        } else if (data.type === "tool_call" && this.callbacks.toolCall) {
+          this.callbacks.toolCall(data.toolCallId, data.toolName, data.args);
+        } else if (data.type === "tool_result" && this.callbacks.toolResult) {
+          this.callbacks.toolResult(data.toolCallId);
+        } else if (data.type === "tool_start" && this.callbacks.toolStart) {
+          this.callbacks.toolStart();
+        } else if (data.type === "tool_end" && this.callbacks.toolEnd) {
+          this.callbacks.toolEnd();
+        } else if (data.type === "timeout_deferred" && this.callbacks.timeoutDeferred) {
+          this.callbacks.timeoutDeferred(data.message);
+        } else if (data.type === "message" && this.callbacks.message) {
+          this.callbacks.message(data.content);
+        } else if (data.type === "done" && this.callbacks.streamEnd) {
+          this.callbacks.streamEnd();
         }
-    }
+      } catch (err) {
+        console.error("Error parsing message", err);
+      }
+    };
 
-    onMessage(callback) {
-        this.callbacks.message = callback;
-    }
+    this.socket.onerror = (error) => {
+      console.error("WebSocket error:", error);
+      if (this.callbacks.error) this.callbacks.error(error);
+    };
 
-    onStreamStart(callback) {
-        this.callbacks.streamStart = callback;
-    }
+    this.socket.onclose = () => {
+      console.log("Disconnected from server");
+      if (this.pingInterval) clearInterval(this.pingInterval);
+      if (this.callbacks.close) this.callbacks.close();
+    };
+  }
 
-    onStreamChunk(callback) {
-        this.callbacks.streamChunk = callback;
+  sendMessage(content, agentId) {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      const payload = { type: "message", content };
+      if (agentId) {
+        payload.agentId = agentId;
+      }
+      this.socket.send(JSON.stringify(payload));
+    } else {
+      console.error("Socket is not open");
     }
+  }
 
-    onStreamEnd(callback) {
-        this.callbacks.streamEnd = callback;
+  disconnect() {
+    if (this.socket) {
+      this.socket.close();
     }
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+    }
+  }
 
-    onError(callback) {
-        this.callbacks.error = callback;
-    }
+  onMessage(callback) {
+    this.callbacks.message = callback;
+  }
 
-    onClose(callback) {
-        this.callbacks.close = callback;
-    }
+  onStreamStart(callback) {
+    this.callbacks.streamStart = callback;
+  }
 
-    _toWebSocketUrl(url) {
-        try {
-            const parsed = new URL(url);
-            if (parsed.protocol === 'http:') parsed.protocol = 'ws:';
-            else if (parsed.protocol === 'https:') parsed.protocol = 'wss:';
-            return parsed.toString();
-        } catch {
-            return url;
-        }
+  onStreamChunk(callback) {
+    this.callbacks.streamChunk = callback;
+  }
+
+  onStreamEnd(callback) {
+    this.callbacks.streamEnd = callback;
+  }
+
+  onToolStart(callback) {
+    this.callbacks.toolStart = callback;
+  }
+
+  onToolEnd(callback) {
+    this.callbacks.toolEnd = callback;
+  }
+
+  onToolCall(callback) {
+    this.callbacks.toolCall = callback;
+  }
+
+  onToolResult(callback) {
+    this.callbacks.toolResult = callback;
+  }
+
+  onTimeoutDeferred(callback) {
+    this.callbacks.timeoutDeferred = callback;
+  }
+
+  onError(callback) {
+    this.callbacks.error = callback;
+  }
+
+  onClose(callback) {
+    this.callbacks.close = callback;
+  }
+
+  _toWebSocketUrl(url) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "http:") parsed.protocol = "ws:";
+      else if (parsed.protocol === "https:") parsed.protocol = "wss:";
+      return parsed.toString();
+    } catch {
+      return url;
     }
+  }
 }
