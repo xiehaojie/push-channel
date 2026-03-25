@@ -160,18 +160,34 @@ function initWebSocket(server) {
                         }),
                       );
                     } else if (event.type === "tool_call") {
-                      socket.send(JSON.stringify({
-                        type: "tool_call",
-                        toolCallId: event.toolCallId,
-                        toolName: event.toolName,
-                        args: event.args ?? {},
-                      }));
+                      if (streamStarted) {
+                        socket.send(JSON.stringify({ type: "stream_end" }));
+                        streamStarted = false;
+                      }
+                      socket.send(
+                        JSON.stringify({
+                          type: "tool_call",
+                          toolCallId: event.toolCallId,
+                          toolName: event.toolName,
+                          args: event.args ?? {},
+                        }),
+                      );
                     } else if (event.type === "tool_result") {
-                      socket.send(JSON.stringify({
-                        type: "tool_result",
-                        toolCallId: event.toolCallId,
-                      }));
+                      if (streamStarted) {
+                        socket.send(JSON.stringify({ type: "stream_end" }));
+                        streamStarted = false;
+                      }
+                      socket.send(
+                        JSON.stringify({
+                          type: "tool_result",
+                          toolCallId: event.toolCallId,
+                        }),
+                      );
                     } else if (event.type === "tool_start") {
+                      if (streamStarted) {
+                        socket.send(JSON.stringify({ type: "stream_end" }));
+                        streamStarted = false;
+                      }
                       markToolRunning(sessionId, true);
                       socket.send(JSON.stringify({ type: "tool_start" }));
                     } else if (event.type === "tool_end") {
@@ -189,6 +205,7 @@ function initWebSocket(server) {
                     } else if (event.type === "done") {
                       if (streamStarted) {
                         socket.send(JSON.stringify({ type: "stream_end" }));
+                        streamStarted = false;
                       }
                     }
                   } catch (e) {
@@ -206,6 +223,7 @@ function initWebSocket(server) {
               // Safety fallback: only send stream_end if the stream was actually opened.
               if (streamStarted && socket.readyState === socket.OPEN) {
                 socket.send(JSON.stringify({ type: "stream_end" }));
+                streamStarted = false;
               }
             });
 
@@ -220,6 +238,7 @@ function initWebSocket(server) {
               }
               if (streamStarted && socket.readyState === socket.OPEN) {
                 socket.send(JSON.stringify({ type: "stream_end" }));
+                streamStarted = false;
               }
             });
           } else {
