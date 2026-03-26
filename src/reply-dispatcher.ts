@@ -70,6 +70,8 @@ export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?:
   const dispatcher = {
     sendToolResult: () => {
       emitToolStart();
+      previousTextLength = 0;
+      hasStreamedContent = false;
       return true;
     },
     sendBlockReply: (payload: any) => {
@@ -81,6 +83,11 @@ export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?:
           res.write(`data: ${JSON.stringify({ type: "content", delta: text })}\n\n`);
         }
       }
+      
+      // Reset for the next block
+      previousTextLength = 0;
+      hasStreamedContent = false;
+      
       return true;
     },
     sendFinalReply: (payload: any) => {
