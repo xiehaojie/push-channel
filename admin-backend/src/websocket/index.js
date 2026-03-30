@@ -4,22 +4,22 @@ const fetch = require("node-fetch");
 
 const OPENCLAW_WEBHOOK_URL = process.env.OPENCLAW_WEBHOOK_URL || "http://localhost:3002/webhook";
 
-const sessions = new Map();
-const activeStreams = new Map(); // Add a map to track active streams per sessionId
+const connections = new Map();
+const activeStreams = new Map();
 const toolExecutionState = new Map();
 const REQUEST_TIMEOUT_HINT = "Request timed out before a response was generated";
 
-function markToolRunning(sessionId, running) {
-  if (!sessionId) return;
+function markToolRunning(agentId, running) {
+  if (!agentId) return;
   if (running) {
-    toolExecutionState.set(sessionId, true);
+    toolExecutionState.set(agentId, true);
   } else {
-    toolExecutionState.delete(sessionId);
+    toolExecutionState.delete(agentId);
   }
 }
 
-function isToolRunning(sessionId) {
-  return toolExecutionState.get(sessionId) === true;
+function isToolRunning(agentId) {
+  return toolExecutionState.get(agentId) === true;
 }
 
 function isTimeoutMessage(text) {
@@ -50,59 +50,61 @@ function initWebSocket(server) {
         return;
       }
 
-      if (data.type === "register" && typeof data.sessionId === "string") {
-        const sessionId = data.sessionId;
+      if (data.type === "register" && typeof data.agentId === "string") {
+        const agentId = data.agentId.trim();
 
-        // Validate session in DB
-        let user = null;
-        if (sessionId.startsWith("test-session")) {
-          user = { id: 1, username: "test" };
-        } else {
-          user = await authService.validateSession(sessionId);
-        }
-
-        if (!user) {
-          socket.close(4001, "Invalid session");
+        if (!agentId) {
+          socket.close(4001, "Invalid agent");
           return;
         }
 
-        const existing = sessions.get(sessionId);
+        let user = null;
+        if (agentId.startsWith("test-agent")) {
+          user = { id: 1, username: "test" };
+        } else {
+          user = await authService.validateAgent(agentId);
+        }
+
+        if (!user) {
+          socket.close(4001, "Invalid agent");
+          return;
+        }
+
+        const existing = connections.get(agentId);
         if (existing && existing !== socket) {
           try {
-            existing.close(4001, "Session already connected");
+            existing.close(4001, "Agent already connected");
           } catch {}
         }
 
-        console.log(`WebSocket: User registered with sessionId: ${sessionId}`);
-        sessions.set(sessionId, socket);
-        socket.sessionId = sessionId;
+        console.log(`WebSocket: User registered with agentId: ${agentId}`);
+        connections.set(agentId, socket);
+        socket.agentId = agentId;
         return;
       }
 
       if (data.type === "message" && typeof data.content === "string") {
-        const sessionId = socket.sessionId;
-        if (!sessionId) {
-          console.error("WebSocket: Socket not registered with sessionId");
+        const agentId = socket.agentId;
+        if (!agentId) {
+          console.error("WebSocket: Socket not registered with agentId");
           return;
         }
 
         try {
-          const payload = { sessionId, content: data.content };
-          if (data.agentId) {
-            payload.agentId = data.agentId;
-          }
+          const sessionId =
+            typeof data.sessionId === "string" && data.sessionId.trim() ? data.sessionId.trim() : agentId;
+          const payload = { agentId, sessionId, content: data.content };
 
-          console.log(`WebSocket: Forwarding to OpenClaw with payload:`, payload);
+          console.log("WebSocket: Forwarding to OpenClaw with payload:", payload);
 
-          // Abort previous stream for this session to prevent overlapping
-          if (activeStreams.has(sessionId)) {
-            console.log(`WebSocket: Aborting previous stream for session: ${sessionId}`);
-            activeStreams.get(sessionId).abort();
-            activeStreams.delete(sessionId);
+          if (activeStreams.has(agentId)) {
+            console.log(`WebSocket: Aborting previous stream for agent: ${agentId}`);
+            activeStreams.get(agentId).abort();
+            activeStreams.delete(agentId);
           }
 
           const abortController = new AbortController();
-          activeStreams.set(sessionId, abortController);
+          activeStreams.set(agentId, abortController);
 
           const res = await fetch(OPENCLAW_WEBHOOK_URL, {
             method: "POST",
@@ -120,121 +122,115 @@ function initWebSocket(server) {
           }
 
           if (res.body) {
-            // stream_start is sent lazily on the first content token so that
-            // tool_call cards appear before the streaming bubble opens.
             let streamStarted = false;
 
             let buffer = "";
             res.body.on("data", (chunk) => {
               buffer += chunk.toString();
               const lines = buffer.split("\n");
-              buffer = lines.pop(); // Keep the last partial line in buffer
+              buffer = lines.pop();
 
               for (const line of lines) {
-                if (line.trim() === "") continue;
-                if (line.startsWith("data: ")) {
-                  const jsonStr = line.slice(6);
-                  try {
-                    const event = JSON.parse(jsonStr);
-                    if (event.type === "content" && event.delta) {
-                      if (isTimeoutMessage(event.delta) && isToolRunning(sessionId)) {
-                        socket.send(
-                          JSON.stringify({
-                            type: "timeout_deferred",
-                            message:
-                              "Tools are still running. Waiting for a follow-up notification.",
-                          }),
-                        );
-                        continue;
-                      }
-                      // Open the stream bubble only on the first real content token.
-                      if (!streamStarted) {
-                        streamStarted = true;
-                        socket.send(JSON.stringify({ type: "stream_start", from: "Assistant" }));
-                      }
-                      socket.send(
-                        JSON.stringify({
-                          type: "stream",
-                          content: event.delta,
-                          role: "assistant",
-                        }),
-                      );
-                    } else if (event.type === "tool_call") {
-                      if (streamStarted) {
-                        socket.send(JSON.stringify({ type: "stream_end" }));
-                        streamStarted = false;
-                      }
-                      socket.send(
-                        JSON.stringify({
-                          type: "tool_call",
-                          toolCallId: event.toolCallId,
-                          toolName: event.toolName,
-                          args: event.args ?? {},
-                        }),
-                      );
-                    } else if (event.type === "tool_result") {
-                      if (streamStarted) {
-                        socket.send(JSON.stringify({ type: "stream_end" }));
-                        streamStarted = false;
-                      }
-                      socket.send(
-                        JSON.stringify({
-                          type: "tool_result",
-                          toolCallId: event.toolCallId,
-                        }),
-                      );
-                    } else if (event.type === "tool_start") {
-                      if (streamStarted) {
-                        socket.send(JSON.stringify({ type: "stream_end" }));
-                        streamStarted = false;
-                      }
-                      markToolRunning(sessionId, true);
-                      socket.send(JSON.stringify({ type: "tool_start" }));
-                    } else if (event.type === "tool_end") {
-                      markToolRunning(sessionId, false);
-                      socket.send(JSON.stringify({ type: "tool_end" }));
-                    } else if (event.type === "timeout_deferred") {
+                if (line.trim() === "" || !line.startsWith("data: ")) continue;
+
+                const jsonStr = line.slice(6);
+                try {
+                  const event = JSON.parse(jsonStr);
+                  if (event.type === "content" && event.delta) {
+                    if (isTimeoutMessage(event.delta) && isToolRunning(agentId)) {
                       socket.send(
                         JSON.stringify({
                           type: "timeout_deferred",
-                          message:
-                            event.message ||
-                            "Tools are still running. Waiting for a follow-up notification.",
+                          message: "Tools are still running. Waiting for a follow-up notification.",
                         }),
                       );
-                    } else if (event.type === "done") {
-                      if (streamStarted) {
-                        socket.send(JSON.stringify({ type: "stream_end" }));
-                        streamStarted = false;
-                      }
+                      continue;
                     }
-                  } catch (e) {
-                    console.error("Error parsing SSE event:", e);
+
+                    if (!streamStarted) {
+                      streamStarted = true;
+                      socket.send(JSON.stringify({ type: "stream_start", from: "Assistant" }));
+                    }
+
+                    socket.send(
+                      JSON.stringify({
+                        type: "stream",
+                        content: event.delta,
+                        role: "assistant",
+                      }),
+                    );
+                  } else if (event.type === "tool_call") {
+                    if (streamStarted) {
+                      socket.send(JSON.stringify({ type: "stream_end" }));
+                      streamStarted = false;
+                    }
+                    socket.send(
+                      JSON.stringify({
+                        type: "tool_call",
+                        toolCallId: event.toolCallId,
+                        toolName: event.toolName,
+                        args: event.args ?? {},
+                      }),
+                    );
+                  } else if (event.type === "tool_result") {
+                    if (streamStarted) {
+                      socket.send(JSON.stringify({ type: "stream_end" }));
+                      streamStarted = false;
+                    }
+                    socket.send(
+                      JSON.stringify({
+                        type: "tool_result",
+                        toolCallId: event.toolCallId,
+                      }),
+                    );
+                  } else if (event.type === "tool_start") {
+                    if (streamStarted) {
+                      socket.send(JSON.stringify({ type: "stream_end" }));
+                      streamStarted = false;
+                    }
+                    markToolRunning(agentId, true);
+                    socket.send(JSON.stringify({ type: "tool_start" }));
+                  } else if (event.type === "tool_end") {
+                    markToolRunning(agentId, false);
+                    socket.send(JSON.stringify({ type: "tool_end" }));
+                  } else if (event.type === "timeout_deferred") {
+                    socket.send(
+                      JSON.stringify({
+                        type: "timeout_deferred",
+                        message:
+                          event.message ||
+                          "Tools are still running. Waiting for a follow-up notification.",
+                      }),
+                    );
+                  } else if (event.type === "done" && streamStarted) {
+                    socket.send(JSON.stringify({ type: "stream_end" }));
+                    streamStarted = false;
                   }
+                } catch (error) {
+                  console.error("Error parsing SSE event:", error);
                 }
               }
             });
 
             res.body.on("end", () => {
               console.log("OpenClaw stream ended");
-              if (activeStreams.get(sessionId) === abortController) {
-                activeStreams.delete(sessionId);
+              if (activeStreams.get(agentId) === abortController) {
+                activeStreams.delete(agentId);
               }
-              // Safety fallback: only send stream_end if the stream was actually opened.
               if (streamStarted && socket.readyState === socket.OPEN) {
                 socket.send(JSON.stringify({ type: "stream_end" }));
                 streamStarted = false;
               }
             });
 
-            res.body.on("error", (err) => {
-              if (err.name === "AbortError" || err.type === "aborted") {
-                console.log(`OpenClaw stream aborted for session: ${sessionId}`);
+            res.body.on("error", (error) => {
+              if (error.name === "AbortError" || error.type === "aborted") {
+                console.log(`OpenClaw stream aborted for agent: ${agentId}`);
               } else {
-                console.error("OpenClaw stream error:", err);
+                console.error("OpenClaw stream error:", error);
               }
-              if (activeStreams.get(sessionId) === abortController) {
-                activeStreams.delete(sessionId);
+              if (activeStreams.get(agentId) === abortController) {
+                activeStreams.delete(agentId);
               }
               if (streamStarted && socket.readyState === socket.OPEN) {
                 socket.send(JSON.stringify({ type: "stream_end" }));
@@ -242,13 +238,13 @@ function initWebSocket(server) {
               }
             });
           } else {
-            console.log(`WebSocket: Forwarded to OpenClaw successfully (no stream body)`);
+            console.log("WebSocket: Forwarded to OpenClaw successfully (no stream body)");
           }
-        } catch (e) {
-          if (e.name === "AbortError") {
-            console.log(`WebSocket: Stream aborted for session: ${sessionId}`);
+        } catch (error) {
+          if (error.name === "AbortError") {
+            console.log(`WebSocket: Stream aborted for agent: ${agentId}`);
           } else {
-            console.error("WebSocket: Failed to forward to OpenClaw", e);
+            console.error("WebSocket: Failed to forward to OpenClaw", error);
           }
         }
       }
@@ -256,25 +252,27 @@ function initWebSocket(server) {
 
     socket.on("close", () => {
       console.log("WebSocket: User disconnected");
-      if (socket.sessionId) {
-        if (activeStreams.has(socket.sessionId)) {
-          activeStreams.get(socket.sessionId).abort();
-          activeStreams.delete(socket.sessionId);
-        }
-        markToolRunning(socket.sessionId, false);
-        const current = sessions.get(socket.sessionId);
-        if (current === socket) {
-          sessions.delete(socket.sessionId);
-        }
+      if (!socket.agentId) return;
+
+      if (activeStreams.has(socket.agentId)) {
+        activeStreams.get(socket.agentId).abort();
+        activeStreams.delete(socket.agentId);
+      }
+
+      markToolRunning(socket.agentId, false);
+      const current = connections.get(socket.agentId);
+      if (current === socket) {
+        connections.delete(socket.agentId);
       }
     });
   });
 
-  // Heartbeat
   const interval = setInterval(() => {
     wss.clients.forEach((ws) => {
       if (ws.isAlive === false) {
-        if (ws.sessionId) sessions.delete(ws.sessionId);
+        if (ws.agentId) {
+          connections.delete(ws.agentId);
+        }
         return ws.terminate();
       }
       ws.isAlive = false;
@@ -286,7 +284,7 @@ function initWebSocket(server) {
     clearInterval(interval);
   });
 
-  return sessions;
+  return connections;
 }
 
-module.exports = { initWebSocket, sessions, isToolRunning, markToolRunning };
+module.exports = { initWebSocket, connections, isToolRunning, markToolRunning };

@@ -4,15 +4,15 @@ const ws = new WebSocket('ws://localhost:3001');
 
 ws.on('open', () => {
     console.log('Connected');
-    ws.send(JSON.stringify({ type: 'register', sessionId: 'test-session-1' }));
+    ws.send(JSON.stringify({ type: 'register', agentId: 'test-agent-1' }));
     
     setTimeout(() => {
         console.log('Sending msg 1');
-        ws.send(JSON.stringify({ type: 'message', content: 'Hello' }));
+        ws.send(JSON.stringify({ type: 'message', sessionId: 'test-session-1', content: 'Hello' }));
         
         setTimeout(() => {
             console.log('Sending msg 2 (overlapping)');
-            ws.send(JSON.stringify({ type: 'message', content: 'World' }));
+            ws.send(JSON.stringify({ type: 'message', sessionId: 'test-session-2', content: 'World' }));
         }, 500); // Send second message before first finishes
     }, 1000);
 });

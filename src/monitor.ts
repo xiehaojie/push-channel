@@ -39,14 +39,16 @@ export async function monitorPushChannel(opts: { config: ClawdbotConfig, runtime
                  console.log(`[PushChannel] Request body received, length: ${body.length}`);
                  try {
                      const data = JSON.parse(body);
-                     // data: { sessionId, content, agentId? }
-                     const { sessionId, content, agentId } = data;
+                     const rawSessionId = typeof data.sessionId === "string" ? data.sessionId.trim() : "";
+                     const agentId = typeof data.agentId === "string" ? data.agentId.trim() : "";
+                     const content = data.content;
+                     const sessionId = rawSessionId || agentId;
                      
-                     log(`[PushChannel] Webhook received message for sessionId: ${sessionId}, agentId: ${agentId || 'default (not provided)'}`);
+                     log(`[PushChannel] Webhook received message for sessionId: ${sessionId || 'default'}, agentId: ${agentId || 'missing'}`);
 
-                     if (!sessionId || !content) {
+                     if (!agentId || !content) {
                         res.writeHead(400);
-                        res.end("Missing sessionId or content");
+                        res.end("Missing agentId or content");
                         return;
                     }
 
@@ -130,6 +132,7 @@ async function retryOperation<T>(operation: () => Promise<T>, maxRetries: number
 
 async function handleIncomingMessage(cfg: ClawdbotConfig, runtime: RuntimeEnv, account: ResolvedPushChannelAccount, sessionId: string, content: string, agentId: string = "default", res?: http.ServerResponse) {
     const core = getPushChannelRuntime(); 
+    const log = runtime.log || console.log;
     if (!core) {
         throw new Error("PushChannel runtime not available");
     }
@@ -153,7 +156,8 @@ async function handleIncomingMessage(cfg: ClawdbotConfig, runtime: RuntimeEnv, a
         ? streaming.dispatcher
         : createPushChannelReplyDispatcher({
             middlewareUrl: account.config.middlewareUrl,
-            sessionId: sessionId
+            agentId,
+            sessionId
         });
 
     const ctxPayload = replyModule.finalizeInboundContext({

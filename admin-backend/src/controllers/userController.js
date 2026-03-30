@@ -1,6 +1,5 @@
 const userRepository = require('../repositories/userRepository');
 const { success, error } = require('../utils/response');
-const { v4: uuidv4 } = require('uuid');
 
 class UserController {
     async list(ctx) {
@@ -69,7 +68,8 @@ class UserController {
     async create(ctx) {
         try {
             const { username, password, email, name, phone, department, title, role_id } = ctx.request.body;
-            if (!username || !password || !email || !name) {
+            const agentId = typeof ctx.request.body.agentId === 'string' ? ctx.request.body.agentId.trim() : '';
+            if (!username || !password || !email || !name || !agentId) {
                 ctx.status = 400;
                 ctx.body = error('Missing required fields');
                 return;
@@ -82,16 +82,30 @@ class UserController {
                 return;
             }
 
+            const existingAgentUser = await userRepository.findByAgentId(agentId);
+            if (existingAgentUser) {
+                ctx.status = 400;
+                ctx.body = error('Agent ID already exists');
+                return;
+            }
+
             const bcrypt = require('bcrypt');
             const password_hash = await bcrypt.hash(password, 10);
             const userRoleId = role_id || 3; // Default to 'user'
-            const session_id = uuidv4();
 
             const userId = await userRepository.create({
-                username, email, password_hash, name, phone, department, title, role_id: userRoleId, session_id
+                username,
+                email,
+                password_hash,
+                name,
+                phone,
+                department,
+                title,
+                role_id: userRoleId,
+                agent_id: agentId
             });
 
-            ctx.body = success({ id: userId, session_id }, 'User created successfully');
+            ctx.body = success({ id: userId, agentId }, 'User created successfully');
         } catch (err) {
             ctx.status = 500;
             ctx.body = error('Failed to create user');

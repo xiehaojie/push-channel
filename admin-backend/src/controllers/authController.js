@@ -11,7 +11,7 @@ class AuthController {
                 return;
             }
 
-            const result = await authService.login(username, password, ctx.ip, ctx.header['user-agent']);
+            const result = await authService.login(username, password);
             ctx.body = success(result);
         } catch (err) {
             ctx.status = 401;
@@ -22,15 +22,16 @@ class AuthController {
     async register(ctx) {
         try {
             const { username, password, email, name } = ctx.request.body;
-            if (!username || !password || !email || !name) {
+            const agentId = typeof ctx.request.body.agentId === 'string' ? ctx.request.body.agentId.trim() : '';
+            if (!username || !password || !email || !name || !agentId) {
                 ctx.status = 400;
                 ctx.body = error('Missing required fields');
                 return;
             }
 
-            const userId = await authService.register(ctx.request.body);
+            await authService.register({ ...ctx.request.body, agentId });
             // Auto login after register
-            const result = await authService.login(username, password, ctx.ip, ctx.header['user-agent']);
+            const result = await authService.login(username, password);
             ctx.body = success(result);
         } catch (err) {
             ctx.status = 400;

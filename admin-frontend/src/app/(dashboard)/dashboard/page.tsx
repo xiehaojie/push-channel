@@ -14,6 +14,7 @@ export default function DashboardPage() {
         <p className="text-gray-500">
           You are logged in as <span className="font-semibold text-blue-600 capitalize">{user?.role?.replace('_', ' ')}</span>.
         </p>
+        <p className="text-sm text-gray-400 mt-2">Agent ID: <span className="font-mono">{user?.agentId}</span></p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

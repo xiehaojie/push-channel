@@ -3,13 +3,25 @@ import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
 
-export async function sendPushMessage(middlewareUrl: string, sessionId: string, content: string, retries = 3) {
+export async function sendPushMessage(params: {
+    middlewareUrl: string;
+    agentId: string;
+    content: string;
+    sessionId?: string;
+    retries?: number;
+}) {
+    const { middlewareUrl, agentId, content, sessionId, retries = 3 } = params;
+
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
             await new Promise<void>((resolve, reject) => {
                 const url = new URL(`${middlewareUrl}/send`);
                 const requestModule = url.protocol === 'https:' ? https : http;
-                const postData = JSON.stringify({ sessionId, content });
+                const payload: Record<string, string> = { agentId, content };
+                if (sessionId) {
+                    payload.sessionId = sessionId;
+                }
+                const postData = JSON.stringify(payload);
 
                 const options = {
                     hostname: url.hostname,

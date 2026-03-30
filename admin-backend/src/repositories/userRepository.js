@@ -6,6 +6,17 @@ class UserRepository {
         return rows[0];
     }
 
+    async findByAgentId(agentId) {
+        const [rows] = await db.query(
+            `SELECT u.*, r.name as role_name, r.level as role_level
+             FROM users u
+             LEFT JOIN roles r ON u.role_id = r.id
+             WHERE u.agent_id = ?`,
+            [agentId]
+        );
+        return rows[0];
+    }
+
     async findById(id) {
         const [rows] = await db.query(
             `SELECT u.*, r.name as role_name, r.level as role_level 
@@ -18,18 +29,13 @@ class UserRepository {
     }
 
     async create(user) {
-        const { username, email, password_hash, name, phone, department, title, role_id, session_id } = user;
+        const { username, email, password_hash, name, phone, department, title, role_id, agent_id } = user;
         const [result] = await db.query(
-            `INSERT INTO users (username, email, password_hash, name, phone, department, title, role_id, session_id) 
+            `INSERT INTO users (username, email, password_hash, name, phone, department, title, role_id, agent_id) 
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [username, email, password_hash, name, phone, department, title, role_id, session_id]
+            [username, email, password_hash, name, phone, department, title, role_id, agent_id]
         );
         return result.insertId;
-    }
-
-    async updateSessionId(id, sessionId) {
-        const [result] = await db.query('UPDATE users SET session_id = ? WHERE id = ?', [sessionId, id]);
-        return result.affectedRows > 0;
     }
 
     async updateStatus(id, status) {
@@ -48,7 +54,7 @@ class UserRepository {
     async findAll({ page = 1, pageSize = 10, search = '', status = '', role = '' }) {
         const offset = (page - 1) * pageSize;
         let query = `
-            SELECT u.id, u.username, u.email, u.name, u.phone, u.department, u.title, u.status, u.created_at, u.last_login_at, r.name as role_name, r.level as role_level
+            SELECT u.id, u.username, u.email, u.name, u.phone, u.department, u.title, u.status, u.agent_id, u.created_at, u.last_login_at, r.name as role_name, r.level as role_level
             FROM users u
             LEFT JOIN roles r ON u.role_id = r.id
             WHERE 1=1
@@ -56,9 +62,9 @@ class UserRepository {
         const params = [];
 
         if (search) {
-            query += ` AND (u.username LIKE ? OR u.name LIKE ? OR u.email LIKE ?)`;
+            query += ` AND (u.username LIKE ? OR u.name LIKE ? OR u.email LIKE ? OR u.agent_id LIKE ?)`;
             const searchParam = `%${search}%`;
-            params.push(searchParam, searchParam, searchParam);
+            params.push(searchParam, searchParam, searchParam, searchParam);
         }
 
         if (status) {

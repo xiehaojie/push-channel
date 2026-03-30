@@ -5,6 +5,13 @@ import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/store/authStore';
 import { fetchApi } from '@/lib/api';
 
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return 'An error occurred during login';
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const login = useAuthStore((state) => state.login);
@@ -25,13 +32,13 @@ export default function LoginPage() {
       });
 
       if (data.success) {
-        login(data.data.sessionId, data.data.user);
+        login(data.data.token, data.data.user);
         router.push('/dashboard');
       } else {
         setError(data.message || 'Login failed');
       }
-    } catch (err: any) {
-      setError(err.message || 'An error occurred during login');
+    } catch (error) {
+      setError(getErrorMessage(error));
     } finally {
       setIsLoading(false);
     }

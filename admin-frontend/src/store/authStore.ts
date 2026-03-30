@@ -7,6 +7,7 @@ interface User {
   email: string;
   name: string;
   role: string;
+  agentId: string;
 }
 
 interface AuthState {
@@ -46,7 +47,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         localStorage.removeItem('token');
         set({ user: null, token: null, isAuthenticated: false, isLoading: false });
       }
-    } catch (error) {
+    } catch {
       localStorage.removeItem('token');
       set({ user: null, token: null, isAuthenticated: false, isLoading: false });
     }

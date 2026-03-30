@@ -2,13 +2,14 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { fetchApi } from '@/lib/api';
-import { Search, Filter, MoreVertical, Edit2, Shield, UserX, UserCheck, X, Plus } from 'lucide-react';
+import { Search, Filter, Edit2, Shield, UserX, UserCheck, X, Plus } from 'lucide-react';
 
 interface User {
   id: number;
   username: string;
   email: string;
   name: string;
+  agent_id: string;
   department: string | null;
   title: string | null;
   status: 'active' | 'inactive';
@@ -38,6 +39,7 @@ export default function UsersPage() {
 
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [createForm, setCreateForm] = useState({
+    agentId: '',
     username: '',
     password: '',
     name: '',
@@ -133,6 +135,7 @@ export default function UsersPage() {
       if (data.success) {
         setIsCreateModalOpen(false);
         setCreateForm({
+          agentId: '',
           username: '',
           password: '',
           name: '',
@@ -159,7 +162,7 @@ export default function UsersPage() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
           <input
             type="text"
-            placeholder="Search by username, name, or email..."
+            placeholder="Search by agent ID, username, name, or email..."
             value={search}
             onChange={(e) => {
               setSearch(e.target.value);
@@ -247,6 +250,7 @@ export default function UsersPage() {
                       <span className="font-medium text-gray-900">{user.name}</span>
                       <span className="text-sm text-gray-500">{user.email}</span>
                       <span className="text-xs text-gray-400">@{user.username}</span>
+                      <span className="text-xs font-mono text-gray-500">agent: {user.agent_id}</span>
                     </div>
                   </td>
                   <td className="px-6 py-4">
@@ -426,6 +430,16 @@ export default function UsersPage() {
                     </button>
                   </div>
                   <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Agent ID</label>
+                      <input
+                        type="text"
+                        value={createForm.agentId}
+                        onChange={(e) => setCreateForm({ ...createForm, agentId: e.target.value })}
+                        className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                        required
+                      />
+                    </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Username</label>
                       <input

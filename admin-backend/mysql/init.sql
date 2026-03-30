@@ -59,36 +59,24 @@ CREATE TABLE users (
     username VARCHAR(50) UNIQUE NOT NULL COMMENT '用户名',
     email VARCHAR(100) UNIQUE NOT NULL COMMENT '邮箱',
     password_hash VARCHAR(255) NOT NULL COMMENT '加密密码',
+    agent_id VARCHAR(128) UNIQUE NOT NULL COMMENT '用户唯一 Agent ID',
     name VARCHAR(100) NOT NULL COMMENT '真实姓名',
     phone VARCHAR(20) COMMENT '联系电话',
     department VARCHAR(100) COMMENT '所属部门',
     title VARCHAR(100) COMMENT '职位',
     status ENUM('active', 'inactive') DEFAULT 'active' COMMENT '状态',
     role_id INT COMMENT '角色ID',
-    session_id VARCHAR(128) UNIQUE COMMENT 'Fixed Session ID',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     last_login_at TIMESTAMP NULL COMMENT '最后登录时间',
     INDEX idx_username (username),
     INDEX idx_email (email),
+    INDEX idx_agent_id (agent_id),
     INDEX idx_status (status),
     INDEX idx_role_id (role_id),
     FOREIGN KEY (role_id) REFERENCES roles(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 插入超级管理员用户 (密码为 admin123, hash 为 $2b$10$zJak3zgriEd4PFGTqHX65ewLN6iHTBEwwOJ6PppZyyIJFjRe0yGEK)
-INSERT INTO users (username, email, password_hash, name, department, title, status, role_id) 
-VALUES ('admin', 'admin@example.com', '$2b$10$zJak3zgriEd4PFGTqHX65ewLN6iHTBEwwOJ6PppZyyIJFjRe0yGEK', '超级管理员', '技术部', '系统管理员', 'active', 1);
-
--- 创建会话表
-CREATE TABLE sessions (
-    session_id VARCHAR(128) PRIMARY KEY COMMENT '会话ID',
-    user_id INT NOT NULL COMMENT '用户ID',
-    expires_at TIMESTAMP NOT NULL COMMENT '过期时间',
-    ip_address VARCHAR(45) COMMENT 'IP地址',
-    user_agent TEXT COMMENT '用户代理',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_user_id (user_id),
-    INDEX idx_expires_at (expires_at),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+INSERT INTO users (username, email, password_hash, agent_id, name, department, title, status, role_id) 
+VALUES ('admin', 'admin@example.com', '$2b$10$zJak3zgriEd4PFGTqHX65ewLN6iHTBEwwOJ6PppZyyIJFjRe0yGEK', 'admin', '超级管理员', '技术部', '系统管理员', 'active', 1);

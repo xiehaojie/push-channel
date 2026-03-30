@@ -1,7 +1,7 @@
 class PushChannelSDK {
-  constructor(url, sessionId) {
+  constructor(url, agentId) {
     this.url = url;
-    this.sessionId = sessionId;
+    this.agentId = agentId;
     this.socket = null;
     this.callbacks = {
       message: null,
@@ -25,9 +25,8 @@ class PushChannelSDK {
 
     this.socket.onopen = () => {
       console.log("Connected to server");
-      this.socket.send(JSON.stringify({ type: "register", sessionId: this.sessionId }));
+      this.socket.send(JSON.stringify({ type: "register", agentId: this.agentId }));
 
-      // Start heartbeat
       this.pingInterval = setInterval(() => {
         if (this.socket.readyState === WebSocket.OPEN) {
           this.socket.send(JSON.stringify({ type: "ping" }));
@@ -40,7 +39,6 @@ class PushChannelSDK {
         const data = JSON.parse(event.data);
 
         if (data.type === "pong") {
-          // Heartbeat received
           return;
         }
 
@@ -82,11 +80,11 @@ class PushChannelSDK {
     };
   }
 
-  sendMessage(content, agentId) {
+  sendMessage(content, sessionId) {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       const payload = { type: "message", content };
-      if (agentId) {
-        payload.agentId = agentId;
+      if (sessionId) {
+        payload.sessionId = sessionId;
       }
       this.socket.send(JSON.stringify(payload));
     } else {

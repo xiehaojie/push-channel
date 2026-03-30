@@ -129,9 +129,10 @@ export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?:
 
 export function createPushChannelReplyDispatcher(params: {
   middlewareUrl: string;
-  sessionId: string;
+  agentId: string;
+  sessionId?: string;
 }) {
-  const { middlewareUrl, sessionId } = params;
+  const { middlewareUrl, agentId, sessionId } = params;
   const runtime = getPushChannelRuntime();
 
   return {
@@ -140,9 +141,8 @@ export function createPushChannelReplyDispatcher(params: {
     sendFinalReply: (payload: any) => {
       const text = payload.text || payload.content || "";
       if (text) {
-        // Fire and forget, but log errors
-        sendPushMessage(middlewareUrl, sessionId, text).catch((err) => {
-          runtime.log?.(`Failed to send reply to ${sessionId}: ${err}`);
+        sendPushMessage({ middlewareUrl, agentId, sessionId, content: text }).catch((err) => {
+          runtime.log?.(`Failed to send reply to ${agentId}: ${err}`);
         });
       }
       return true;

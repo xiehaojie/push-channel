@@ -10,16 +10,16 @@ const authenticate = async (ctx, next) => {
     }
 
     const token = authHeader.split(' ')[1];
-    const user = await authService.validateSession(token);
+    const user = await authService.validateToken(token);
 
     if (!user) {
         ctx.status = 401;
-        ctx.body = error('Invalid or expired session', 401);
+        ctx.body = error('Invalid or expired token', 401);
         return;
     }
 
     ctx.state.user = user;
-    ctx.state.sessionId = token;
+    ctx.state.token = token;
     await next();
 };
 

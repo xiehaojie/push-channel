@@ -10,7 +10,6 @@
 
 <body>
     <div id="app">
-        <!-- Auth panel -->
         <div id="auth-container">
             <h2 id="auth-title">Login</h2>
             <div class="tab-bar">
@@ -18,15 +17,14 @@
                 <button id="tab-register" class="tab" onclick="switchTab('register')">Register</button>
             </div>
 
-            <!-- Login form -->
             <form id="login-form">
                 <input type="text" id="login-username" placeholder="Username" required>
                 <input type="password" id="login-password" placeholder="Password" required>
                 <button type="submit">Login</button>
             </form>
 
-            <!-- Register form -->
             <form id="register-form" style="display:none;">
+                <input type="text" id="reg-agent-id" placeholder="Agent ID" required>
                 <input type="text" id="reg-username" placeholder="Username" required>
                 <input type="password" id="reg-password" placeholder="Password" required>
                 <input type="text" id="reg-name" placeholder="Display name" required>
@@ -37,17 +35,16 @@
             <p id="auth-error" class="error"></p>
         </div>
 
-        <!-- Chat panel -->
         <div id="chat-container" style="display: none;">
             <div id="chat-header">
                 <div class="header-left">
                     <h2>OpenClaw Chat</h2>
-                    <span id="session-display" class="session-label"></span>
+                    <span id="agent-display" class="session-label"></span>
                 </div>
                 <div class="header-right">
-                    <span id="tool-status" class="tool-status" style="display:none;">🛠️ Tools running...</span>
-                    <label for="agent-id-input">Agent:</label>
-                    <input type="text" id="agent-id-input" placeholder="default">
+                    <span id="tool-status" class="tool-status" style="display:none;">Tools running...</span>
+                    <label for="session-id-input">Session:</label>
+                    <input type="text" id="session-id-input" placeholder="chat-session">
                     <button id="logout-btn">Logout</button>
                 </div>
             </div>
@@ -67,13 +64,20 @@
         const authError = document.getElementById('auth-error');
         const authContainer = document.getElementById('auth-container');
         const chatContainer = document.getElementById('chat-container');
-        const sessionDisplay = document.getElementById('session-display');
+        const agentDisplay = document.getElementById('agent-display');
         const messagesDiv = document.getElementById('messages');
         const messageForm = document.getElementById('message-form');
         const messageInput = document.getElementById('message-input');
-        const agentIdInput = document.getElementById('agent-id-input');
+        const sessionIdInput = document.getElementById('session-id-input');
         const toolStatus = document.getElementById('tool-status');
         let isToolRunning = false;
+
+        function createSessionId(agentId) {
+            if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+                return `${agentId}-${window.crypto.randomUUID()}`;
+            }
+            return `${agentId}-${Date.now()}`;
+        }
 
         function updateToolStatus() {
             if (!toolStatus) return;
@@ -102,7 +106,7 @@
                 });
                 const data = await res.json();
                 if (data.success) {
-                    startChat(data.data.sessionId);
+                    startChat(data.data.agentId);
                 } else {
                     authError.textContent = data.message || 'Login failed';
                 }
@@ -114,6 +118,7 @@
         document.getElementById('register-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             authError.textContent = '';
+            const agentId = document.getElementById('reg-agent-id').value.trim();
             const username = document.getElementById('reg-username').value;
             const password = document.getElementById('reg-password').value;
             const name = document.getElementById('reg-name').value;
@@ -122,11 +127,11 @@
                 const res = await fetch(`${API_BASE}/api/auth/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, name, email })
+                    body: JSON.stringify({ agentId, username, password, name, email })
                 });
                 const data = await res.json();
                 if (data.success) {
-                    startChat(data.data.sessionId);
+                    startChat(data.data.agentId);
                 } else {
                     authError.textContent = data.message || 'Registration failed';
                 }
@@ -135,12 +140,13 @@
             }
         });
 
-        function startChat(sessionId) {
+        function startChat(agentId) {
             authContainer.style.display = 'none';
             chatContainer.style.display = 'flex';
-            sessionDisplay.textContent = sessionId.slice(0, 8) + '…';
+            agentDisplay.textContent = `Agent: ${agentId}`;
+            sessionIdInput.value = createSessionId(agentId);
 
-            sdk = new PushChannelSDK(`${API_BASE}`, sessionId);
+            sdk = new PushChannelSDK(`${API_BASE}`, agentId);
 
             sdk.onMessage((msg) => appendMessage('Bot', msg));
 
@@ -177,7 +183,7 @@
                 const argsStr = args && Object.keys(args).length > 0
                     ? JSON.stringify(args, null, 2)
                     : '(no args)';
-                div.innerHTML = `<span>🛠️ <strong>${toolName}</strong><pre class="tool-args">${argsStr}</pre></span>`;
+                div.innerHTML = `<span><strong>${toolName}</strong><pre class="tool-args">${argsStr}</pre></span>`;
                 messagesDiv.appendChild(div);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
             });
@@ -187,26 +193,24 @@
                 if (card) {
                     card.classList.add('tool-done');
                     const strong = card.querySelector('strong');
-                    if (strong) strong.insertAdjacentText('beforebegin', '✅ ');
-                    const spinner = card.querySelector('.spinner');
-                    if (spinner) spinner.remove();
+                    if (strong) strong.insertAdjacentText('beforebegin', 'done ');
                 }
             });
 
             sdk.onToolStart(() => {
                 isToolRunning = true;
                 updateToolStatus();
-                appendSystemMessage('🛠️ 工具执行中，结果会在后续推送。');
+                appendSystemMessage('Tools are running. Follow-up replies may arrive later.');
             });
 
             sdk.onToolEnd(() => {
                 isToolRunning = false;
                 updateToolStatus();
-                appendSystemMessage('✅ 工具执行完成。');
+                appendSystemMessage('Tools finished.');
             });
 
             sdk.onTimeoutDeferred((msg) => {
-                appendSystemMessage(msg || '工具仍在执行，已忽略本次超时提示，等待后续通知。');
+                appendSystemMessage(msg || 'Tools are still running. Waiting for follow-up.');
             });
 
             sdk.connect();
@@ -215,10 +219,10 @@
         messageForm.addEventListener('submit', (e) => {
             e.preventDefault();
             const text = messageInput.value.trim();
-            const agentId = agentIdInput.value.trim() || undefined;
+            const sessionId = sessionIdInput.value.trim();
             if (text && sdk) {
                 appendMessage('You', text);
-                sdk.sendMessage(text, agentId);
+                sdk.sendMessage(text, sessionId);
                 messageInput.value = '';
             }
         });
