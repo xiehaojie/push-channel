@@ -4,7 +4,7 @@ const fetch = require("node-fetch");
 
 const OPENCLAW_WEBHOOK_URL = process.env.OPENCLAW_WEBHOOK_URL || "http://10.14.100.131:3002/webhook";
 
-const connections = new Map();
+const connections = new Map(); // Map<agentId, Set<socket>>
 const activeStreams = new Map();
 const toolExecutionState = new Map();
 const REQUEST_TIMEOUT_HINT = "Request timed out before a response was generated";
@@ -24,6 +24,17 @@ function isToolRunning(agentId) {
 
 function isTimeoutMessage(text) {
   return typeof text === "string" && text.includes(REQUEST_TIMEOUT_HINT);
+}
+
+function broadcast(agentId, message, excludeSocket = null) {
+  const socketSet = connections.get(agentId);
+  if (!socketSet) return;
+  const msgStr = typeof message === "string" ? message : JSON.stringify(message);
+  for (const sock of socketSet) {
+    if (sock !== excludeSocket && sock.readyState === 1) { // WebSocket.OPEN
+      sock.send(msgStr);
+    }
+  }
 }
 
 function initWebSocket(server) {
@@ -46,7 +57,7 @@ function initWebSocket(server) {
       }
 
       if (data.type === "ping") {
-        socket.send(JSON.stringify({ type: "pong" }));
+        socket.send(JSON.stringify({ type: "pong" })); // 只回复请求者
         return;
       }
 
@@ -70,15 +81,15 @@ function initWebSocket(server) {
           return;
         }
 
-        const existing = connections.get(agentId);
-        if (existing && existing !== socket) {
-          try {
-            existing.close(4001, "Agent already connected");
-          } catch {}
+        // 支持同一 agentId 多个连接
+        let socketSet = connections.get(agentId);
+        if (!socketSet) {
+          socketSet = new Set();
+          connections.set(agentId, socketSet);
         }
+        socketSet.add(socket);
 
-        console.log(`WebSocket: User registered with agentId: ${agentId}`);
-        connections.set(agentId, socket);
+        console.log(`WebSocket: User registered with agentId: ${agentId}, total connections: ${socketSet.size}`);
         socket.agentId = agentId;
         return;
       }
@@ -94,6 +105,13 @@ function initWebSocket(server) {
           const sessionId =
             typeof data.sessionId === "string" && data.sessionId.trim() ? data.sessionId.trim() : agentId;
           const payload = { agentId, sessionId, content: data.content };
+
+          // 广播用户发送的消息到同 agentId 的其他标签页（排除自己）
+          broadcast(agentId, JSON.stringify({
+            type: "message_sent",
+            content: data.content,
+            role: "user"
+          }), socket);
 
           console.log("WebSocket: Forwarding to OpenClaw with payload:", payload);
 
@@ -115,7 +133,7 @@ function initWebSocket(server) {
 
           if (!res.ok) {
             console.error(`WebSocket: Failed to forward to OpenClaw: ${res.statusText}`);
-            socket.send(
+            broadcast(agentId,
               JSON.stringify({ type: "error", message: `OpenClaw error: ${res.statusText}` }),
             );
             return;
@@ -138,7 +156,7 @@ function initWebSocket(server) {
                   const event = JSON.parse(jsonStr);
                   if (event.type === "content" && event.delta) {
                     if (isTimeoutMessage(event.delta) && isToolRunning(agentId)) {
-                      socket.send(
+                      broadcast(agentId,
                         JSON.stringify({
                           type: "timeout_deferred",
                           message: "Tools are still running. Waiting for a follow-up notification.",
@@ -149,10 +167,10 @@ function initWebSocket(server) {
 
                     if (!streamStarted) {
                       streamStarted = true;
-                      socket.send(JSON.stringify({ type: "stream_start", from: "Assistant" }));
+                      broadcast(agentId,JSON.stringify({ type: "stream_start", from: "Assistant" }));
                     }
 
-                    socket.send(
+                    broadcast(agentId,
                       JSON.stringify({
                         type: "stream",
                         content: event.delta,
@@ -161,10 +179,10 @@ function initWebSocket(server) {
                     );
                   } else if (event.type === "tool_call") {
                     if (streamStarted) {
-                      socket.send(JSON.stringify({ type: "stream_end" }));
+                      broadcast(agentId,JSON.stringify({ type: "stream_end" }));
                       streamStarted = false;
                     }
-                    socket.send(
+                    broadcast(agentId,
                       JSON.stringify({
                         type: "tool_call",
                         toolCallId: event.toolCallId,
@@ -174,10 +192,10 @@ function initWebSocket(server) {
                     );
                   } else if (event.type === "tool_result") {
                     if (streamStarted) {
-                      socket.send(JSON.stringify({ type: "stream_end" }));
+                      broadcast(agentId,JSON.stringify({ type: "stream_end" }));
                       streamStarted = false;
                     }
-                    socket.send(
+                    broadcast(agentId,
                       JSON.stringify({
                         type: "tool_result",
                         toolCallId: event.toolCallId,
@@ -185,16 +203,16 @@ function initWebSocket(server) {
                     );
                   } else if (event.type === "tool_start") {
                     if (streamStarted) {
-                      socket.send(JSON.stringify({ type: "stream_end" }));
+                      broadcast(agentId,JSON.stringify({ type: "stream_end" }));
                       streamStarted = false;
                     }
                     markToolRunning(agentId, true);
-                    socket.send(JSON.stringify({ type: "tool_start" }));
+                    broadcast(agentId,JSON.stringify({ type: "tool_start" }));
                   } else if (event.type === "tool_end") {
                     markToolRunning(agentId, false);
-                    socket.send(JSON.stringify({ type: "tool_end" }));
+                    broadcast(agentId,JSON.stringify({ type: "tool_end" }));
                   } else if (event.type === "timeout_deferred") {
-                    socket.send(
+                    broadcast(agentId,
                       JSON.stringify({
                         type: "timeout_deferred",
                         message:
@@ -203,7 +221,7 @@ function initWebSocket(server) {
                       }),
                     );
                   } else if (event.type === "done" && streamStarted) {
-                    socket.send(JSON.stringify({ type: "stream_end" }));
+                    broadcast(agentId,JSON.stringify({ type: "stream_end" }));
                     streamStarted = false;
                   }
                 } catch (error) {
@@ -218,7 +236,7 @@ function initWebSocket(server) {
                 activeStreams.delete(agentId);
               }
               if (streamStarted && socket.readyState === socket.OPEN) {
-                socket.send(JSON.stringify({ type: "stream_end" }));
+                broadcast(agentId,JSON.stringify({ type: "stream_end" }));
                 streamStarted = false;
               }
             });
@@ -233,7 +251,7 @@ function initWebSocket(server) {
                 activeStreams.delete(agentId);
               }
               if (streamStarted && socket.readyState === socket.OPEN) {
-                socket.send(JSON.stringify({ type: "stream_end" }));
+                broadcast(agentId,JSON.stringify({ type: "stream_end" }));
                 streamStarted = false;
               }
             });
@@ -254,15 +272,19 @@ function initWebSocket(server) {
       console.log("WebSocket: User disconnected");
       if (!socket.agentId) return;
 
-      if (activeStreams.has(socket.agentId)) {
-        activeStreams.get(socket.agentId).abort();
-        activeStreams.delete(socket.agentId);
-      }
-
-      markToolRunning(socket.agentId, false);
-      const current = connections.get(socket.agentId);
-      if (current === socket) {
-        connections.delete(socket.agentId);
+      // 从连接集合中移除
+      const socketSet = connections.get(socket.agentId);
+      if (socketSet) {
+        socketSet.delete(socket);
+        if (socketSet.size === 0) {
+          connections.delete(socket.agentId);
+          // 该 agentId 无连接时，中止其流
+          if (activeStreams.has(socket.agentId)) {
+            activeStreams.get(socket.agentId).abort();
+            activeStreams.delete(socket.agentId);
+          }
+          markToolRunning(socket.agentId, false);
+        }
       }
     });
   });
@@ -271,7 +293,13 @@ function initWebSocket(server) {
     wss.clients.forEach((ws) => {
       if (ws.isAlive === false) {
         if (ws.agentId) {
-          connections.delete(ws.agentId);
+          const socketSet = connections.get(ws.agentId);
+          if (socketSet) {
+            socketSet.delete(ws);
+            if (socketSet.size === 0) {
+              connections.delete(ws.agentId);
+            }
+          }
         }
         return ws.terminate();
       }
