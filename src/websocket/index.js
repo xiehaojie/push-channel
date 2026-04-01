@@ -2,7 +2,7 @@ const { WebSocketServer } = require("ws");
 const authService = require("../services/authService");
 const fetch = require("node-fetch");
 
-const OPENCLAW_WEBHOOK_URL = process.env.OPENCLAW_WEBHOOK_URL || "http://localhost:3002/webhook";
+const OPENCLAW_WEBHOOK_URL = process.env.OPENCLAW_WEBHOOK_URL || "http://10.14.100.131:3002/webhook";
 
 const connections = new Map();
 const activeStreams = new Map();

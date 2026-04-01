@@ -52,7 +52,13 @@ class UserController {
         try {
             const { id } = ctx.params;
             const { name, email, department, title } = ctx.request.body;
-            const updated = await userRepository.updateUser(id, { name, email, department, title });
+            // Map to new DB fields: name -> nickname, department -> orguid, title -> post_name
+            const updated = await userRepository.updateUser(id, { 
+                nickname: name, 
+                email, 
+                orguid: department, 
+                post_name: title 
+            });
             if (!updated) {
                 ctx.status = 404;
                 ctx.body = error('User not found');
@@ -96,13 +102,13 @@ class UserController {
             const userId = await userRepository.create({
                 username,
                 email,
-                password_hash,
-                name,
+                password: password_hash, // Map to new DB field: password
+                nickname: name, // Map to new DB field: nickname
                 phone,
-                department,
-                title,
+                orguid: department, // Map to new DB field: orguid
+                post_name: title, // Map to new DB field: post_name
                 role_id: userRoleId,
-                agent_id: agentId
+                oidc_user_id: agentId // Map to new DB field: oidc_user_id
             });
 
             ctx.body = success({ id: userId, agentId }, 'User created successfully');
