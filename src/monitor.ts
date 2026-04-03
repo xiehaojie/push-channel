@@ -182,8 +182,8 @@ async function handleIncomingMessage(cfg: ClawdbotConfig, runtime: RuntimeEnv, a
         MessageSid: Date.now().toString(),
         ReplyToBody: undefined,
         Timestamp: Date.now(),
-        WasMentioned: false,
-        CommandAuthorized: undefined,
+        WasMentioned: true,
+        CommandAuthorized: true,
         OriginatingChannel: "push-channel",
         OriginatingTo: peerId,
     });
