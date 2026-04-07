@@ -1,5 +1,6 @@
 const Router = require('@koa/router');
 const userController = require('./controllers/userController');
+const fileController = require('./controllers/fileController');
 const { authenticate, requireRole } = require('./middleware/auth');
 
 const router = new Router();
@@ -9,5 +10,8 @@ router.get('/users', authenticate, requireRole(['super_admin', 'admin']), userCo
 router.post('/users', authenticate, requireRole(['super_admin', 'admin']), userController.create);
 router.patch('/users/:id/status', authenticate, requireRole(['super_admin', 'admin']), userController.updateStatus);
 router.put('/users/:id', authenticate, requireRole(['super_admin', 'admin']), userController.updateUser);
+
+// File management routes
+router.get('/files/list', authenticate, fileController.listFiles);
 
 module.exports = { router };
