@@ -5,9 +5,15 @@ const fetch = require("node-fetch");
 const OPENCLAW_WEBHOOK_URL = process.env.OPENCLAW_WEBHOOK_URL || "http://localhost:3002/webhook";
 
 const connections = new Map();
-const activeStreams = new Map();
 const toolExecutionState = new Map();
 const REQUEST_TIMEOUT_HINT = "Request timed out before a response was generated";
+
+// Per-agent sequential processing chain.
+// Key: agentId, Value: Promise<void> (the tail of the current chain).
+// When a new message arrives, we append to the chain so messages are
+// processed one at a time, in order — fixing "both messages silently fail"
+// when two are sent concurrently.
+const agentChains = new Map();
 
 function markToolRunning(agentId, running) {
   if (!agentId) return;
@@ -26,8 +32,273 @@ function isTimeoutMessage(text) {
   return typeof text === "string" && text.includes(REQUEST_TIMEOUT_HINT);
 }
 
+/**
+ * Process a single message: send it to the OpenClaw plugin via HTTP SSE and
+ * forward all events back through the WebSocket.
+ */
+async function processMessageWithSSE(socket, agentId, sessionId, content) {
+  if (socket.readyState !== socket.OPEN) {
+    console.log(`WebSocket: Socket for ${agentId} is closed, skipping message`);
+    return;
+  }
+
+  const payload = { agentId, sessionId, content };
+  console.log("WebSocket: Forwarding to OpenClaw with payload:", JSON.stringify(payload));
+
+  let res;
+  try {
+    res = await fetch(OPENCLAW_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.error("WebSocket: Failed to reach OpenClaw plugin", error);
+    if (socket.readyState === socket.OPEN) {
+      socket.send(JSON.stringify({ type: "error", message: "Could not reach OpenClaw plugin" }));
+    }
+    return;
+  }
+
+  if (!res.ok) {
+    console.error(`WebSocket: OpenClaw returned ${res.status} ${res.statusText}`);
+    if (socket.readyState === socket.OPEN) {
+      socket.send(JSON.stringify({ type: "error", message: `OpenClaw error: ${res.statusText}` }));
+    }
+    return;
+  }
+
+  if (!res.body) {
+    console.log("WebSocket: No stream body from OpenClaw");
+    return;
+  }
+
+  await new Promise((resolve) => {
+    let streamStarted = false;
+    let buffer = "";
+
+    res.body.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (line.trim() === "" || !line.startsWith("data: ")) continue;
+        const jsonStr = line.slice(6);
+        let event;
+        try {
+          event = JSON.parse(jsonStr);
+        } catch {
+          continue;
+        }
+
+        if (socket.readyState !== socket.OPEN) break;
+
+        if (event.type === "content" && event.delta) {
+          if (isTimeoutMessage(event.delta) && isToolRunning(agentId)) {
+            socket.send(JSON.stringify({
+              type: "timeout_deferred",
+              message: "Tools are still running. Waiting for a follow-up notification.",
+            }));
+            continue;
+          }
+          if (!streamStarted) {
+            streamStarted = true;
+            socket.send(JSON.stringify({ type: "stream_start", from: "Assistant" }));
+          }
+          socket.send(JSON.stringify({ type: "stream", content: event.delta, role: "assistant" }));
+        } else if (event.type === "tool_call") {
+          if (streamStarted) {
+            socket.send(JSON.stringify({ type: "stream_end" }));
+            streamStarted = false;
+          }
+          socket.send(JSON.stringify({
+            type: "tool_call",
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            args: event.args ?? {},
+          }));
+        } else if (event.type === "tool_result") {
+          if (streamStarted) {
+            socket.send(JSON.stringify({ type: "stream_end" }));
+            streamStarted = false;
+          }
+          socket.send(JSON.stringify({ type: "tool_result", toolCallId: event.toolCallId }));
+        } else if (event.type === "tool_start") {
+          if (streamStarted) {
+            socket.send(JSON.stringify({ type: "stream_end" }));
+            streamStarted = false;
+          }
+          markToolRunning(agentId, true);
+          socket.send(JSON.stringify({ type: "tool_start" }));
+        } else if (event.type === "tool_end") {
+          markToolRunning(agentId, false);
+          socket.send(JSON.stringify({ type: "tool_end" }));
+        } else if (event.type === "timeout_deferred") {
+          socket.send(JSON.stringify({
+            type: "timeout_deferred",
+            message: event.message || "Tools are still running. Waiting for a follow-up notification.",
+          }));
+        } else if (event.type === "done") {
+          if (streamStarted) {
+            socket.send(JSON.stringify({ type: "stream_end" }));
+            streamStarted = false;
+          }
+        }
+      }
+    });
+
+    res.body.on("end", () => {
+      console.log(`WebSocket: OpenClaw stream ended for agent: ${agentId}`);
+      markToolRunning(agentId, false);
+      if (streamStarted && socket.readyState === socket.OPEN) {
+        socket.send(JSON.stringify({ type: "stream_end" }));
+      }
+      resolve();
+    });
+
+    res.body.on("error", (error) => {
+      console.error(`WebSocket: Stream error for agent ${agentId}:`, error);
+      markToolRunning(agentId, false);
+      if (streamStarted && socket.readyState === socket.OPEN) {
+        socket.send(JSON.stringify({ type: "stream_end" }));
+      }
+      resolve(); // don't reject — let the chain continue for the next message
+    });
+  });
+}
+
+/**
+ * Append a message to the agent's sequential processing chain.
+ * Returns the new tail promise.
+ */
+function enqueueMessage(socket, agentId, sessionId, content) {
+  const prev = agentChains.get(agentId) ?? Promise.resolve();
+  const next = prev
+    .then(() => processMessageWithSSE(socket, agentId, sessionId, content))
+    .catch((err) => console.error(`WebSocket: Error in chain for ${agentId}:`, err));
+  agentChains.set(agentId, next);
+  // Clean up once this entry is the tail and has settled
+  next.finally(() => {
+    if (agentChains.get(agentId) === next) {
+      agentChains.delete(agentId);
+    }
+  });
+  return next;
+}
+
 function initWebSocket(server) {
   const wss = new WebSocketServer({ server });
+
+  wss.on("connection", (socket) => {
+    console.log("WebSocket: A user connected");
+
+    socket.isAlive = true;
+    socket.on("pong", () => {
+      socket.isAlive = true;
+    });
+
+    socket.on("message", async (raw) => {
+      let data;
+      try {
+        data = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+
+      if (data.type === "ping") {
+        socket.send(JSON.stringify({ type: "pong" }));
+        return;
+      }
+
+      if (data.type === "register" && typeof data.agentId === "string") {
+        const agentId = data.agentId.trim();
+
+        if (!agentId) {
+          socket.close(4001, "Invalid agent");
+          return;
+        }
+
+        let user = null;
+        if (agentId.startsWith("test-agent")) {
+          user = { id: 1, username: "test" };
+        } else {
+          user = await authService.validateAgent(agentId);
+        }
+
+        if (!user) {
+          socket.close(4001, "Invalid agent");
+          return;
+        }
+
+        const existing = connections.get(agentId);
+        if (existing && existing !== socket) {
+          try {
+            existing.close(4001, "Agent already connected");
+          } catch {}
+        }
+
+        console.log(`WebSocket: User registered with agentId: ${agentId}`);
+        connections.set(agentId, socket);
+        socket.agentId = agentId;
+        return;
+      }
+
+      if (data.type === "message" && typeof data.content === "string") {
+        const agentId = socket.agentId;
+        if (!agentId) {
+          console.error("WebSocket: Socket not registered with agentId");
+          return;
+        }
+
+        const sessionId =
+          typeof data.sessionId === "string" && data.sessionId.trim()
+            ? data.sessionId.trim()
+            : agentId;
+
+        console.log(`WebSocket: Queuing message for agent ${agentId}`);
+
+        // Enqueue — do NOT await here so the message handler returns promptly.
+        // Sequential processing ensures earlier messages complete before later ones start.
+        enqueueMessage(socket, agentId, sessionId, data.content);
+      }
+    });
+
+    socket.on("close", () => {
+      console.log("WebSocket: User disconnected");
+      if (!socket.agentId) return;
+
+      // Clean up state; the chain tail will resolve naturally
+      markToolRunning(socket.agentId, false);
+      const current = connections.get(socket.agentId);
+      if (current === socket) {
+        connections.delete(socket.agentId);
+      }
+    });
+  });
+
+  const interval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (ws.isAlive === false) {
+        if (ws.agentId) {
+          connections.delete(ws.agentId);
+        }
+        return ws.terminate();
+      }
+      ws.isAlive = false;
+      ws.ping();
+    });
+  }, 30000);
+
+  wss.on("close", () => {
+    clearInterval(interval);
+  });
+
+  return connections;
+}
+
+module.exports = { initWebSocket, connections, isToolRunning, markToolRunning };
+
 
   wss.on("connection", (socket) => {
     console.log("WebSocket: A user connected");
