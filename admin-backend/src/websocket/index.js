@@ -1,19 +1,51 @@
 const { WebSocketServer } = require("ws");
 const authService = require("../services/authService");
 const fetch = require("node-fetch");
+const { startFileWatcher, stopFileWatcher, setBroadcastFileChange, getUserDir } = require("../controllers/fileController");
+const { IGNORED_FILES, IGNORED_DIRS } = require("../config/fileFilter");
+const fs = require("fs");
+const path = require("path");
 
-const OPENCLAW_WEBHOOK_URL = process.env.OPENCLAW_WEBHOOK_URL || "http://localhost:3002/webhook";
+const OPENCLAW_WEBHOOK_URL = process.env.OPENCLAW_WEBHOOK_URL || "http://10.14.100.131:3002/webhook";
 
-const connections = new Map();
+// SSE 流日志 —— 写入 logs/sse-stream.log 便于排查
+// const LOG_DIR = path.join(__dirname, "../../logs");
+// const SSE_LOG_FILE = path.join(LOG_DIR, "sse-stream.log");
+// try { if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (_) { /* ignore */ }
+
+// function sseLog(agentId, tag, msg) {
+//   const ts = new Date().toISOString();
+//   const line = `[${ts}] [${agentId}] [${tag}] ${msg}\n`;
+//   try { fs.appendFileSync(SSE_LOG_FILE, line); } catch (_) { /* ignore */ }
+// }
+
+const connections = new Map(); // Map<agentId, Set<socket>>
+const activeStreams = new Map();
 const toolExecutionState = new Map();
 const REQUEST_TIMEOUT_HINT = "Request timed out before a response was generated";
 
-// Per-agent sequential processing chain.
-// Key: agentId, Value: Promise<void> (the tail of the current chain).
-// When a new message arrives, we append to the chain so messages are
-// processed one at a time, in order — fixing "both messages silently fail"
-// when two are sent concurrently.
-const agentChains = new Map();
+// 文件变化广播函数
+function broadcastFileChange(agentId, message) {
+    console.log(`[Broadcast] Received file change for agentId: ${agentId}`, message);
+    const socketSet = connections.get(agentId);
+    if (!socketSet) {
+        console.log(`[Broadcast] No socket connections found for agentId: ${agentId}`);
+        return;
+    }
+    console.log(`[Broadcast] Found ${socketSet.size} connections for agentId: ${agentId}`);
+    const msgStr = JSON.stringify(message);
+    for (const sock of socketSet) {
+        if (sock.readyState === 1) { // WebSocket.OPEN
+            console.log(`[Broadcast] Sending to socket`);
+            sock.send(msgStr);
+        } else {
+            console.log(`[Broadcast] Socket not open, state: ${sock.readyState}`);
+        }
+    }
+}
+
+// 注入广播函数到 fileController
+setBroadcastFileChange(broadcastFileChange);
 
 function markToolRunning(agentId, running) {
   if (!agentId) return;
@@ -32,162 +64,68 @@ function isTimeoutMessage(text) {
   return typeof text === "string" && text.includes(REQUEST_TIMEOUT_HINT);
 }
 
-/**
- * Process a single message: send it to the OpenClaw plugin via HTTP SSE and
- * forward all events back through the WebSocket.
- */
-async function processMessageWithSSE(socket, agentId, sessionId, content) {
-  if (socket.readyState !== socket.OPEN) {
-    console.log(`WebSocket: Socket for ${agentId} is closed, skipping message`);
-    return;
-  }
-
-  const payload = { agentId, sessionId, content };
-  console.log("WebSocket: Forwarding to OpenClaw with payload:", JSON.stringify(payload));
-
-  let res;
-  try {
-    res = await fetch(OPENCLAW_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  } catch (error) {
-    console.error("WebSocket: Failed to reach OpenClaw plugin", error);
-    if (socket.readyState === socket.OPEN) {
-      socket.send(JSON.stringify({ type: "error", message: "Could not reach OpenClaw plugin" }));
+function broadcast(agentId, message, excludeSocket = null) {
+  const socketSet = connections.get(agentId);
+  if (!socketSet) return;
+  const msgStr = typeof message === "string" ? message : JSON.stringify(message);
+  for (const sock of socketSet) {
+    if (sock !== excludeSocket && sock.readyState === 1) { // WebSocket.OPEN
+      sock.send(msgStr);
     }
-    return;
   }
-
-  if (!res.ok) {
-    console.error(`WebSocket: OpenClaw returned ${res.status} ${res.statusText}`);
-    if (socket.readyState === socket.OPEN) {
-      socket.send(JSON.stringify({ type: "error", message: `OpenClaw error: ${res.statusText}` }));
-    }
-    return;
-  }
-
-  if (!res.body) {
-    console.log("WebSocket: No stream body from OpenClaw");
-    return;
-  }
-
-  await new Promise((resolve) => {
-    let streamStarted = false;
-    let buffer = "";
-
-    res.body.on("data", (chunk) => {
-      buffer += chunk.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.trim() === "" || !line.startsWith("data: ")) continue;
-        const jsonStr = line.slice(6);
-        let event;
-        try {
-          event = JSON.parse(jsonStr);
-        } catch {
-          continue;
-        }
-
-        if (socket.readyState !== socket.OPEN) break;
-
-        if (event.type === "content" && event.delta) {
-          if (isTimeoutMessage(event.delta) && isToolRunning(agentId)) {
-            socket.send(JSON.stringify({
-              type: "timeout_deferred",
-              message: "Tools are still running. Waiting for a follow-up notification.",
-            }));
-            continue;
-          }
-          if (!streamStarted) {
-            streamStarted = true;
-            socket.send(JSON.stringify({ type: "stream_start", from: "Assistant" }));
-          }
-          socket.send(JSON.stringify({ type: "stream", content: event.delta, role: "assistant" }));
-        } else if (event.type === "tool_call") {
-          if (streamStarted) {
-            socket.send(JSON.stringify({ type: "stream_end" }));
-            streamStarted = false;
-          }
-          socket.send(JSON.stringify({
-            type: "tool_call",
-            toolCallId: event.toolCallId,
-            toolName: event.toolName,
-            args: event.args ?? {},
-          }));
-        } else if (event.type === "tool_result") {
-          if (streamStarted) {
-            socket.send(JSON.stringify({ type: "stream_end" }));
-            streamStarted = false;
-          }
-          socket.send(JSON.stringify({ type: "tool_result", toolCallId: event.toolCallId }));
-        } else if (event.type === "tool_start") {
-          if (streamStarted) {
-            socket.send(JSON.stringify({ type: "stream_end" }));
-            streamStarted = false;
-          }
-          markToolRunning(agentId, true);
-          socket.send(JSON.stringify({ type: "tool_start" }));
-        } else if (event.type === "tool_end") {
-          markToolRunning(agentId, false);
-          socket.send(JSON.stringify({ type: "tool_end" }));
-        } else if (event.type === "timeout_deferred") {
-          socket.send(JSON.stringify({
-            type: "timeout_deferred",
-            message: event.message || "Tools are still running. Waiting for a follow-up notification.",
-          }));
-        } else if (event.type === "done") {
-          if (streamStarted) {
-            socket.send(JSON.stringify({ type: "stream_end" }));
-            streamStarted = false;
-          }
-        }
-      }
-    });
-
-    res.body.on("end", () => {
-      console.log(`WebSocket: OpenClaw stream ended for agent: ${agentId}`);
-      markToolRunning(agentId, false);
-      if (streamStarted && socket.readyState === socket.OPEN) {
-        socket.send(JSON.stringify({ type: "stream_end" }));
-      }
-      resolve();
-    });
-
-    res.body.on("error", (error) => {
-      console.error(`WebSocket: Stream error for agent ${agentId}:`, error);
-      markToolRunning(agentId, false);
-      if (streamStarted && socket.readyState === socket.OPEN) {
-        socket.send(JSON.stringify({ type: "stream_end" }));
-      }
-      resolve(); // don't reject — let the chain continue for the next message
-    });
-  });
 }
 
-/**
- * Append a message to the agent's sequential processing chain.
- * Returns the new tail promise.
- */
-function enqueueMessage(socket, agentId, sessionId, content) {
-  const prev = agentChains.get(agentId) ?? Promise.resolve();
-  const next = prev
-    .then(() => processMessageWithSSE(socket, agentId, sessionId, content))
-    .catch((err) => console.error(`WebSocket: Error in chain for ${agentId}:`, err));
-  agentChains.set(agentId, next);
-  // Clean up once this entry is the tail and has settled
-  next.finally(() => {
-    if (agentChains.get(agentId) === next) {
-      agentChains.delete(agentId);
+let namingClient = null;
+let userCenterServiceName = null;
+
+// 从 user-center 服务获取用户信息
+async function getUserFromUserCenter(jbUserId) {
+    if (!namingClient || !userCenterServiceName) {
+        console.error('[WebSocket] Naming client not initialized');
+        return null;
     }
-  });
-  return next;
+
+    try {
+        const instances = await namingClient.selectInstances(userCenterServiceName);
+        if (!instances || instances.length === 0) {
+            console.error('[WebSocket] No instances found for user-center');
+            return null;
+        }
+
+        const instance = instances[0];
+        const url = `http://${instance.ip}:${instance.port}/users/jbUserId?jbUserId=${encodeURIComponent(jbUserId)}`;
+        console.log('[WebSocket] Calling user-center:', url);
+
+        const response = await fetch(url);
+        const text = await response.text();
+        console.log('[WebSocket] Response from user-center:', text.substring(0, 500));
+
+        const result = JSON.parse(text);
+
+        // user-center 返回的是 datas 字段，可能有 code 也可能没有
+        const userData = result.data || result.datas;
+
+        if (userData && (result.code === 200 || result.code === undefined)) {
+            // 映射字段，兼容不同格式
+            return {
+                id: userData.id,
+                username: userData.username,
+                openclawEnabled: userData.openclawEnabled !== false // 默认为 true
+            };
+        }
+
+        console.error('[WebSocket] Failed to get user:', result.message || 'Unknown error');
+        return null;
+    } catch (e) {
+        console.error('[WebSocket] Error calling user-center:', e.message);
+        return null;
+    }
 }
 
-function initWebSocket(server) {
+function initWebSocket(server, nc, ucServiceName) {
+  namingClient = nc;
+  userCenterServiceName = ucServiceName;
+
   const wss = new WebSocketServer({ server });
 
   wss.on("connection", (socket) => {
@@ -207,7 +145,7 @@ function initWebSocket(server) {
       }
 
       if (data.type === "ping") {
-        socket.send(JSON.stringify({ type: "pong" }));
+        socket.send(JSON.stringify({ type: "pong" })); // 只回复请求者
         return;
       }
 
@@ -220,137 +158,375 @@ function initWebSocket(server) {
         }
 
         let user = null;
-        if (agentId.startsWith("test-agent")) {
-          user = { id: 1, username: "test" };
-        } else {
-          user = await authService.validateAgent(agentId);
-        }
 
-        if (!user) {
-          socket.close(4001, "Invalid agent");
-          return;
-        }
+        // [TEMP] 注释掉用户验证，直接允许所有连接
+        user = { id: 0, username: agentId };
+        console.log(`WebSocket: [TEMP] Bypassing auth — allowing agentId: ${agentId}`);
 
-        const existing = connections.get(agentId);
-        if (existing && existing !== socket) {
-          try {
-            existing.close(4001, "Agent already connected");
-          } catch {}
-        }
+        // if (!namingClient || !userCenterServiceName) {
+        //   // No Nacos / user-center available — allow all agents in local mode
+        //   user = { id: 0, username: agentId };
+        //   openclawEnabled = true;
+        //   console.log(`WebSocket: Local mode — allowing agentId: ${agentId} without user-center`);
+        // } else if (agentId.startsWith("test-agent")) {
+        //   // 测试用户，直接允许
+        //   user = { id: 1, username: "test" };
+        //   openclawEnabled = true;
+        // } else {
+        //   // 从 user-center 获取用户信息
+        //   user = await getUserFromUserCenter(agentId);
+        //   if (user) {
+        //     openclawEnabled = user.openclawEnabled === true;
+        //   }
+        // }
 
-        console.log(`WebSocket: User registered with agentId: ${agentId}`);
-        connections.set(agentId, socket);
+        // [TEMP] 注释掉 openclawEnabled 校验
+        // if (!user) {
+        //   console.log(`WebSocket: User not found for agentId: ${agentId}`);
+        //   socket.close(4001, "User not found");
+        //   return;
+        // }
+
+        // if (!openclawEnabled) {
+        //   console.log(`WebSocket: openclawEnabled is false for agentId: ${agentId}`);
+        //   socket.send(JSON.stringify({ type: "error", message: "没有权限" }));
+        //   socket.close(4002, "OpenClaw not enabled");
+        //   return;
+        // }
+
+        // 支持同一 agentId 多个连接
+        let socketSet = connections.get(agentId);
+        if (!socketSet) {
+          socketSet = new Set();
+          connections.set(agentId, socketSet);
+        }
+        socketSet.add(socket);
+
+        console.log(`WebSocket: User registered with agentId: ${agentId}, total connections: ${socketSet.size}`);
         socket.agentId = agentId;
+
+        // 如果是第一个连接，启动文件监听
+        if (socketSet.size === 1) {
+            startFileWatcher(agentId);
+        }
+
+        // 返回当前目录下所有文件列表
+        const userDir = getUserDir(agentId);
+        // 支持指定子目录路径
+        const subPath = typeof data.path === "string" ? data.path.trim() : "";
+        const targetDir = subPath ? path.join(userDir, subPath) : userDir;
+        let fileList = [];
+        try {
+            // 确保目录存在
+            if (!fs.existsSync(targetDir)) {
+                try {
+                    fs.mkdirSync(targetDir, { recursive: true });
+                } catch (e) {
+                    console.error(`Failed to create directory: ${e.message}`);
+                }
+            }
+
+            if (fs.existsSync(targetDir)) {
+                const items = fs.readdirSync(targetDir, { withFileTypes: true });
+                fileList = items
+                    .filter(item => !IGNORED_FILES.includes(item.name) && !IGNORED_DIRS.includes(item.name))
+                    .map(item => {
+                        const fullPath = path.join(targetDir, item.name);
+                        let fileBase64 = null;
+                        let fileSize = 0;
+                        if (item.isFile()) {
+                            const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+                            try {
+                                const stats = fs.statSync(fullPath);
+                                fileSize = stats.size;
+
+                                // 如果文件超过10M，不读取base64
+                                if (fileSize > MAX_FILE_SIZE) {
+                                    fileBase64 = null;
+                                } else {
+                                    const content = fs.readFileSync(fullPath);
+                                    fileBase64 = content.toString('base64');
+                                }
+                            } catch (e) {
+                                console.error(`Failed to read file ${fullPath}: ${e.message}`);
+                            }
+                        }
+                        // 获取文件最后修改时间
+                        let lastModified = null;
+                        try {
+                            const stats = fs.statSync(fullPath);
+                            lastModified = stats.mtime.toISOString();
+                        } catch (e) {
+                            // 忽略错误
+                        }
+
+                        return {
+                            name: item.name,
+                            isDirectory: item.isDirectory(),
+                            isFile: item.isFile(),
+                            path: item.name,
+                            fullPath: fullPath,
+                            fileBase64: fileBase64,
+                            fileSize: fileSize,
+                            lastModified: lastModified
+                        };
+                    });
+            }
+        } catch (err) {
+            console.error(`Failed to list files for ${agentId}: ${err.message}`);
+        }
+
+        socket.send(JSON.stringify({
+            type: "registered",
+            agentId: agentId,
+            path: subPath,
+            files: fileList
+        }));
+
         return;
       }
 
-      if (data.type === "message" && typeof data.content === "string") {
+      // 处理用户修改文件的事件
+      if (data.type === "user-change-file" && data.fileName && data.fileBase64 !== undefined) {
         const agentId = socket.agentId;
         if (!agentId) {
           console.error("WebSocket: Socket not registered with agentId");
           return;
         }
 
-        const sessionId =
-          typeof data.sessionId === "string" && data.sessionId.trim()
-            ? data.sessionId.trim()
-            : agentId;
+        const userDir = getUserDir(agentId);
+        const filePath = path.join(userDir, data.fileName);
+        const normalizedUserDir = path.normalize(userDir);
+        const normalizedFilePath = path.normalize(filePath);
 
-        console.log(`WebSocket: Queuing message for agent ${agentId}`);
-
-        // Enqueue — do NOT await here so the message handler returns promptly.
-        // Sequential processing ensures earlier messages complete before later ones start.
-        enqueueMessage(socket, agentId, sessionId, data.content);
-      }
-    });
-
-    socket.on("close", () => {
-      console.log("WebSocket: User disconnected");
-      if (!socket.agentId) return;
-
-      // Clean up state; the chain tail will resolve naturally
-      markToolRunning(socket.agentId, false);
-      const current = connections.get(socket.agentId);
-      if (current === socket) {
-        connections.delete(socket.agentId);
-      }
-    });
-  });
-
-  const interval = setInterval(() => {
-    wss.clients.forEach((ws) => {
-      if (ws.isAlive === false) {
-        if (ws.agentId) {
-          connections.delete(ws.agentId);
+        // 安全检查：确保路径在 userDir 内
+        if (!normalizedFilePath.startsWith(normalizedUserDir + path.sep)) {
+          console.error(`WebSocket: Path outside userDir, ignoring: ${filePath}`);
+          socket.send(JSON.stringify({ type: "error", message: "Invalid file path" }));
+          return;
         }
-        return ws.terminate();
-      }
-      ws.isAlive = false;
-      ws.ping();
-    });
-  }, 30000);
 
-  wss.on("close", () => {
-    clearInterval(interval);
-  });
-
-  return connections;
-}
-
-module.exports = { initWebSocket, connections, isToolRunning, markToolRunning };
-
-
-  wss.on("connection", (socket) => {
-    console.log("WebSocket: A user connected");
-
-    socket.isAlive = true;
-    socket.on("pong", () => {
-      socket.isAlive = true;
-    });
-
-    socket.on("message", async (raw) => {
-      let data;
-      try {
-        data = JSON.parse(raw.toString());
-      } catch {
+        try {
+          const fileContent = Buffer.from(data.fileBase64, 'base64');
+          fs.writeFileSync(filePath, fileContent);
+          console.log(`WebSocket: File updated: ${filePath}`);
+          socket.send(JSON.stringify({ type: "file-updated", fileName: data.fileName, success: true }));
+        } catch (err) {
+          console.error(`WebSocket: Failed to write file: ${err.message}`);
+          socket.send(JSON.stringify({ type: "error", message: `Failed to write file: ${err.message}` }));
+        }
         return;
       }
 
-      if (data.type === "ping") {
-        socket.send(JSON.stringify({ type: "pong" }));
-        return;
-      }
-
-      if (data.type === "register" && typeof data.agentId === "string") {
-        const agentId = data.agentId.trim();
-
+      // 处理用户新建文件的事件
+      if (data.type === "user-create-file" && data.fileName) {
+        const agentId = socket.agentId;
         if (!agentId) {
-          socket.close(4001, "Invalid agent");
+          console.error("WebSocket: Socket not registered with agentId");
           return;
         }
 
-        let user = null;
-        if (agentId.startsWith("test-agent")) {
-          user = { id: 1, username: "test" };
-        } else {
-          user = await authService.validateAgent(agentId);
-        }
+        const userDir = getUserDir(agentId);
+        const filePath = path.join(userDir, data.fileName);
+        const normalizedUserDir = path.normalize(userDir);
+        const normalizedFilePath = path.normalize(filePath);
 
-        if (!user) {
-          socket.close(4001, "Invalid agent");
+        // 安全检查
+        if (!normalizedFilePath.startsWith(normalizedUserDir + path.sep)) {
+          console.error(`WebSocket: Path outside userDir, ignoring: ${filePath}`);
+          socket.send(JSON.stringify({ type: "error", message: "Invalid file path" }));
           return;
         }
 
-        const existing = connections.get(agentId);
-        if (existing && existing !== socket) {
-          try {
-            existing.close(4001, "Agent already connected");
-          } catch {}
+        // 检查文件是否已存在
+        if (fs.existsSync(filePath)) {
+          socket.send(JSON.stringify({ type: "error", message: "文件已存在" }));
+          return;
         }
 
-        console.log(`WebSocket: User registered with agentId: ${agentId}`);
-        connections.set(agentId, socket);
-        socket.agentId = agentId;
+        try {
+          const content = data.fileBase64 ? Buffer.from(data.fileBase64, 'base64') : Buffer.from('');
+          fs.writeFileSync(filePath, content);
+          console.log(`WebSocket: File created: ${filePath}`);
+          socket.send(JSON.stringify({ type: "file-created", fileName: data.fileName, success: true }));
+        } catch (err) {
+          console.error(`WebSocket: Failed to create file: ${err.message}`);
+          socket.send(JSON.stringify({ type: "error", message: `Failed to create file: ${err.message}` }));
+        }
+        return;
+      }
+
+      // 处理用户删除文件的事件
+      if (data.type === "user-delete-file" && data.fileName) {
+        const agentId = socket.agentId;
+        if (!agentId) {
+          console.error("WebSocket: Socket not registered with agentId");
+          return;
+        }
+
+        const userDir = getUserDir(agentId);
+        const filePath = path.join(userDir, data.fileName);
+        const normalizedUserDir = path.normalize(userDir);
+        const normalizedFilePath = path.normalize(filePath);
+
+        // 安全检查
+        if (!normalizedFilePath.startsWith(normalizedUserDir + path.sep)) {
+          console.error(`WebSocket: Path outside userDir, ignoring: ${filePath}`);
+          socket.send(JSON.stringify({ type: "error", message: "Invalid file path" }));
+          return;
+        }
+
+        // 不允许删除目录
+        try {
+          const stats = fs.statSync(filePath);
+          if (stats.isDirectory()) {
+            socket.send(JSON.stringify({ type: "error", message: "不支持删除目录" }));
+            return;
+          }
+        } catch (err) {
+          socket.send(JSON.stringify({ type: "error", message: "文件不存在" }));
+          return;
+        }
+
+        try {
+          fs.unlinkSync(filePath);
+          console.log(`WebSocket: File deleted: ${filePath}`);
+          socket.send(JSON.stringify({ type: "file-deleted", fileName: data.fileName, success: true }));
+        } catch (err) {
+          console.error(`WebSocket: Failed to delete file: ${err.message}`);
+          socket.send(JSON.stringify({ type: "error", message: `Failed to delete file: ${err.message}` }));
+        }
+        return;
+      }
+
+      // 处理用户新建文件夹的事件
+      if (data.type === "user-create-dir" && data.dirName) {
+        const agentId = socket.agentId;
+        if (!agentId) {
+          console.error("WebSocket: Socket not registered with agentId");
+          return;
+        }
+
+        const userDir = getUserDir(agentId);
+        const dirPath = path.join(userDir, data.dirName);
+        const normalizedUserDir = path.normalize(userDir);
+        const normalizedDirPath = path.normalize(dirPath);
+
+        // 安全检查
+        if (!normalizedDirPath.startsWith(normalizedUserDir + path.sep)) {
+          console.error(`WebSocket: Path outside userDir, ignoring: ${dirPath}`);
+          socket.send(JSON.stringify({ type: "error", message: "Invalid path" }));
+          return;
+        }
+
+        // 检查目录是否已存在
+        if (fs.existsSync(dirPath)) {
+          socket.send(JSON.stringify({ type: "error", message: "目录已存在" }));
+          return;
+        }
+
+        try {
+          fs.mkdirSync(dirPath, { recursive: true });
+          console.log(`WebSocket: Directory created: ${dirPath}`);
+          socket.send(JSON.stringify({ type: "dir-created", dirName: data.dirName, success: true }));
+        } catch (err) {
+          console.error(`WebSocket: Failed to create directory: ${err.message}`);
+          socket.send(JSON.stringify({ type: "error", message: `Failed to create directory: ${err.message}` }));
+        }
+        return;
+      }
+
+      // 处理用户删除文件夹的事件
+      if (data.type === "user-delete-dir" && data.dirName) {
+        const agentId = socket.agentId;
+        if (!agentId) {
+          console.error("WebSocket: Socket not registered with agentId");
+          return;
+        }
+
+        const userDir = getUserDir(agentId);
+        const dirPath = path.join(userDir, data.dirName);
+        const normalizedUserDir = path.normalize(userDir);
+        const normalizedDirPath = path.normalize(dirPath);
+
+        // 安全检查
+        if (!normalizedDirPath.startsWith(normalizedUserDir + path.sep)) {
+          console.error(`WebSocket: Path outside userDir, ignoring: ${dirPath}`);
+          socket.send(JSON.stringify({ type: "error", message: "Invalid path" }));
+          return;
+        }
+
+        // 检查是否为目录
+        try {
+          const stats = fs.statSync(dirPath);
+          if (!stats.isDirectory()) {
+            socket.send(JSON.stringify({ type: "error", message: "不是目录" }));
+            return;
+          }
+        } catch (err) {
+          socket.send(JSON.stringify({ type: "error", message: "目录不存在" }));
+          return;
+        }
+
+        try {
+          // 递归删除目录
+          fs.rmSync(dirPath, { recursive: true, force: true });
+          console.log(`WebSocket: Directory deleted: ${dirPath}`);
+          socket.send(JSON.stringify({ type: "dir-deleted", dirName: data.dirName, success: true }));
+        } catch (err) {
+          console.error(`WebSocket: Failed to delete directory: ${err.message}`);
+          socket.send(JSON.stringify({ type: "error", message: `Failed to delete directory: ${err.message}` }));
+        }
+        return;
+      }
+
+      // 处理用户重命名目录/文件夹的事件
+      if (data.type === "user-rename-dir" && data.oldName && data.newName) {
+        const agentId = socket.agentId;
+        if (!agentId) {
+          console.error("WebSocket: Socket not registered with agentId");
+          return;
+        }
+
+        const userDir = getUserDir(agentId);
+        const normalizedUserDir = path.normalize(userDir);
+
+        // 处理 oldName
+        const oldPath = data.oldName.startsWith('/') ? data.oldName : path.join(userDir, data.oldName);
+        const normalizedOldPath = path.normalize(oldPath);
+
+        // 处理 newName
+        const newPath = data.newName.startsWith('/') ? data.newName : path.join(userDir, data.newName);
+        const normalizedNewPath = path.normalize(newPath);
+
+        // 安全检查
+        if (!normalizedOldPath.startsWith(normalizedUserDir + path.sep) || !normalizedNewPath.startsWith(normalizedUserDir + path.sep)) {
+          console.error(`WebSocket: Path outside userDir, ignoring`);
+          socket.send(JSON.stringify({ type: "error", message: "Invalid path" }));
+          return;
+        }
+
+        // 检查原路径是否存在
+        if (!fs.existsSync(oldPath)) {
+          socket.send(JSON.stringify({ type: "error", message: "原路径不存在" }));
+          return;
+        }
+
+        // 检查新路径是否已存在
+        if (fs.existsSync(newPath)) {
+          socket.send(JSON.stringify({ type: "error", message: "目标路径已存在" }));
+          return;
+        }
+
+        try {
+          fs.renameSync(oldPath, newPath);
+          console.log(`WebSocket: Renamed: ${oldPath} -> ${newPath}`);
+          socket.send(JSON.stringify({ type: "dir-renamed", oldName: data.oldName, newName: data.newName, success: true }));
+        } catch (err) {
+          console.error(`WebSocket: Failed to rename: ${err.message}`);
+          socket.send(JSON.stringify({ type: "error", message: `重命名失败: ${err.message}` }));
+        }
         return;
       }
 
@@ -365,6 +541,13 @@ module.exports = { initWebSocket, connections, isToolRunning, markToolRunning };
           const sessionId =
             typeof data.sessionId === "string" && data.sessionId.trim() ? data.sessionId.trim() : agentId;
           const payload = { agentId, sessionId, content: data.content };
+
+          // 广播用户发送的消息到同 agentId 的其他标签页（排除自己）
+          broadcast(agentId, JSON.stringify({
+            type: "message_sent",
+            content: data.content,
+            role: "user"
+          }), socket);
 
           console.log("WebSocket: Forwarding to OpenClaw with payload:", payload);
 
@@ -386,7 +569,7 @@ module.exports = { initWebSocket, connections, isToolRunning, markToolRunning };
 
           if (!res.ok) {
             console.error(`WebSocket: Failed to forward to OpenClaw: ${res.statusText}`);
-            socket.send(
+            broadcast(agentId,
               JSON.stringify({ type: "error", message: `OpenClaw error: ${res.statusText}` }),
             );
             return;
@@ -396,115 +579,204 @@ module.exports = { initWebSocket, connections, isToolRunning, markToolRunning };
             let streamStarted = false;
 
             let buffer = "";
+            let eventIndex = 0;
+            // 用独立 Map 追踪大型累积 delta（按前缀指纹分组）
+            // key = delta 前80字符, value = 该系列最后一次完整 delta 内容
+            const cumulativeTrackers = new Map();
+            const CUMULATIVE_PREFIX_LEN = 80;   // 指纹长度
+            const CUMULATIVE_MIN_LEN = 200;     // 超过此长度才检测累积模式
+
+            // 提取 SSE 行处理逻辑，供 data 和 end 共用
+            function processSSELine(line) {
+              if (line.trim() === "" || !line.startsWith("data: ")) return;
+
+              const jsonStr = line.slice(6);
+              try {
+                const event = JSON.parse(jsonStr);
+                if (event.type === "content" && event.delta) {
+                  eventIndex++;
+                  const deltaLen = event.delta.length;
+
+                  // sseLog(agentId, "DELTA_RAW", `#${eventIndex} len=${deltaLen} prefix="${event.delta.substring(0, 80).replace(/\n/g, '\\n')}"`);
+
+                  if (isTimeoutMessage(event.delta) && isToolRunning(agentId)) {
+                    broadcast(agentId,
+                      JSON.stringify({
+                        type: "timeout_deferred",
+                        message: "Tools are still running. Waiting for a follow-up notification.",
+                      }),
+                    );
+                    return;
+                  }
+
+                  let contentToSend = event.delta;
+
+                  // 大型 delta：检测是否为累积模式（同一前缀的内容不断增长）
+                  if (deltaLen >= CUMULATIVE_MIN_LEN) {
+                    const fingerprint = event.delta.substring(0, CUMULATIVE_PREFIX_LEN);
+
+                    if (cumulativeTrackers.has(fingerprint)) {
+                      const lastFull = cumulativeTrackers.get(fingerprint);
+
+                      if (deltaLen > lastFull.length && event.delta.startsWith(lastFull)) {
+                        // 累积增长：只更新 tracker，不发送到前端
+                        cumulativeTrackers.set(fingerprint, event.delta);
+                        // sseLog(agentId, "CUMUL_GROW", `#${eventIndex} cumulative growth, DROPPED (was ${lastFull.length}→${deltaLen})`);
+                        return;
+                      } else if (deltaLen <= lastFull.length && lastFull.startsWith(event.delta)) {
+                        // 子集：已发过更完整的版本，跳过
+                        // sseLog(agentId, "CUMUL_SKIP", `#${eventIndex} subset of previous (${deltaLen}<=${lastFull.length}), skipping`);
+                        return;
+                      } else {
+                        // 同前缀但内容变化了（罕见），更新 tracker，也不发送
+                        cumulativeTrackers.set(fingerprint, event.delta);
+                        // sseLog(agentId, "CUMUL_RESET", `#${eventIndex} same prefix but content changed, DROPPED`);
+                        return;
+                      }
+                    } else {
+                      // 新的大型累积 delta 系列，记录指纹，首次也不以 content 发给前端
+                      // 改用 stream_snapshot 类型，前端可按需处理
+                      cumulativeTrackers.set(fingerprint, event.delta);
+                      // sseLog(agentId, "CUMUL_NEW", `#${eventIndex} new cumulative series (${deltaLen} chars), sending as snapshot`);
+
+                      // 以独立类型发送，不干扰 stream 流式渲染
+                      broadcast(agentId,
+                        JSON.stringify({
+                          type: "stream_snapshot",
+                          snapshot: event.delta,
+                          role: "assistant",
+                        }),
+                      );
+                      return;
+                    }
+                  } else {
+                    // sseLog(agentId, "INCREMENTAL", `#${eventIndex} small delta (${deltaLen} chars)`);
+                  }
+
+                  if (!contentToSend) {
+                    // sseLog(agentId, "SKIP_EMPTY", `#${eventIndex} nothing new to send`);
+                    return;
+                  }
+
+                  if (!streamStarted) {
+                    streamStarted = true;
+                    broadcast(agentId, JSON.stringify({ type: "stream_start", from: "Assistant" }));
+                  }
+
+                  // sseLog(agentId, "SEND", `#${eventIndex} sending ${contentToSend.length} chars to WS`);
+
+                  broadcast(agentId,
+                    JSON.stringify({
+                      type: "stream",
+                      content: contentToSend,
+                      role: "assistant",
+                    }),
+                  );
+                } else if (event.type === "tool_call") {
+                  if (streamStarted) {
+                    broadcast(agentId, JSON.stringify({ type: "stream_end" }));
+                    streamStarted = false;
+                  }
+                  broadcast(agentId,
+                    JSON.stringify({
+                      type: "tool_call",
+                      toolCallId: event.toolCallId,
+                      toolName: event.toolName,
+                      args: event.args ?? {},
+                    }),
+                  );
+                } else if (event.type === "tool_result") {
+                  if (streamStarted) {
+                    broadcast(agentId, JSON.stringify({ type: "stream_end" }));
+                    streamStarted = false;
+                  }
+                  broadcast(agentId,
+                    JSON.stringify({
+                      type: "tool_result",
+                      toolCallId: event.toolCallId,
+                    }),
+                  );
+                } else if (event.type === "tool_start") {
+                  if (streamStarted) {
+                    broadcast(agentId, JSON.stringify({ type: "stream_end" }));
+                    streamStarted = false;
+                  }
+                  markToolRunning(agentId, true);
+                  broadcast(agentId, JSON.stringify({ type: "tool_start" }));
+                } else if (event.type === "tool_end") {
+                  markToolRunning(agentId, false);
+                  broadcast(agentId, JSON.stringify({ type: "tool_end" }));
+                } else if (event.type === "timeout_deferred") {
+                  broadcast(agentId,
+                    JSON.stringify({
+                      type: "timeout_deferred",
+                      message:
+                        event.message ||
+                        "Tools are still running. Waiting for a follow-up notification.",
+                    }),
+                  );
+                } else if (event.type === "done" && streamStarted) {
+                  broadcast(agentId, JSON.stringify({ type: "stream_end" }));
+                  streamStarted = false;
+                }
+              } catch (error) {
+                // sseLog(agentId, "PARSE_ERROR", `Failed to parse: ${jsonStr.substring(0, 200)} | error: ${error.message}`);
+                console.error("Error parsing SSE event:", error, "| raw:", jsonStr.substring(0, 200));
+              }
+            }
+
             res.body.on("data", (chunk) => {
-              buffer += chunk.toString();
+              const chunkStr = chunk.toString();
+              // sseLog(agentId, "CHUNK", `received ${chunkStr.length} bytes`);
+              buffer += chunkStr;
               const lines = buffer.split("\n");
               buffer = lines.pop();
 
               for (const line of lines) {
-                if (line.trim() === "" || !line.startsWith("data: ")) continue;
-
-                const jsonStr = line.slice(6);
-                try {
-                  const event = JSON.parse(jsonStr);
-                  if (event.type === "content" && event.delta) {
-                    if (isTimeoutMessage(event.delta) && isToolRunning(agentId)) {
-                      socket.send(
-                        JSON.stringify({
-                          type: "timeout_deferred",
-                          message: "Tools are still running. Waiting for a follow-up notification.",
-                        }),
-                      );
-                      continue;
-                    }
-
-                    if (!streamStarted) {
-                      streamStarted = true;
-                      socket.send(JSON.stringify({ type: "stream_start", from: "Assistant" }));
-                    }
-
-                    socket.send(
-                      JSON.stringify({
-                        type: "stream",
-                        content: event.delta,
-                        role: "assistant",
-                      }),
-                    );
-                  } else if (event.type === "tool_call") {
-                    if (streamStarted) {
-                      socket.send(JSON.stringify({ type: "stream_end" }));
-                      streamStarted = false;
-                    }
-                    socket.send(
-                      JSON.stringify({
-                        type: "tool_call",
-                        toolCallId: event.toolCallId,
-                        toolName: event.toolName,
-                        args: event.args ?? {},
-                      }),
-                    );
-                  } else if (event.type === "tool_result") {
-                    if (streamStarted) {
-                      socket.send(JSON.stringify({ type: "stream_end" }));
-                      streamStarted = false;
-                    }
-                    socket.send(
-                      JSON.stringify({
-                        type: "tool_result",
-                        toolCallId: event.toolCallId,
-                      }),
-                    );
-                  } else if (event.type === "tool_start") {
-                    if (streamStarted) {
-                      socket.send(JSON.stringify({ type: "stream_end" }));
-                      streamStarted = false;
-                    }
-                    markToolRunning(agentId, true);
-                    socket.send(JSON.stringify({ type: "tool_start" }));
-                  } else if (event.type === "tool_end") {
-                    markToolRunning(agentId, false);
-                    socket.send(JSON.stringify({ type: "tool_end" }));
-                  } else if (event.type === "timeout_deferred") {
-                    socket.send(
-                      JSON.stringify({
-                        type: "timeout_deferred",
-                        message:
-                          event.message ||
-                          "Tools are still running. Waiting for a follow-up notification.",
-                      }),
-                    );
-                  } else if (event.type === "done" && streamStarted) {
-                    socket.send(JSON.stringify({ type: "stream_end" }));
-                    streamStarted = false;
-                  }
-                } catch (error) {
-                  console.error("Error parsing SSE event:", error);
-                }
+                processSSELine(line);
               }
             });
 
             res.body.on("end", () => {
+              // sseLog(agentId, "STREAM_END", `totalEvents=${eventIndex} trackedSeries=${cumulativeTrackers.size} bufferRemain=${buffer.length}`);
               console.log("OpenClaw stream ended");
+
+              // 处理 buffer 中残留的最后一行数据（修复长消息截断问题）
+              if (buffer.trim()) {
+                // sseLog(agentId, "FLUSH_BUFFER", `processing remaining ${buffer.length} chars`);
+                processSSELine(buffer);
+                buffer = "";
+              }
+
               if (activeStreams.get(agentId) === abortController) {
                 activeStreams.delete(agentId);
               }
-              if (streamStarted && socket.readyState === socket.OPEN) {
-                socket.send(JSON.stringify({ type: "stream_end" }));
+              if (streamStarted) {
+                broadcast(agentId, JSON.stringify({ type: "stream_end" }));
                 streamStarted = false;
               }
             });
 
             res.body.on("error", (error) => {
+              // sseLog(agentId, "STREAM_ERROR", error.message);
               if (error.name === "AbortError" || error.type === "aborted") {
                 console.log(`OpenClaw stream aborted for agent: ${agentId}`);
               } else {
                 console.error("OpenClaw stream error:", error);
               }
+
+              // 错误时也尝试处理残留 buffer
+              if (buffer.trim()) {
+                console.log(`Processing remaining buffer on error (${buffer.length} chars)`);
+                processSSELine(buffer);
+                buffer = "";
+              }
+
               if (activeStreams.get(agentId) === abortController) {
                 activeStreams.delete(agentId);
               }
-              if (streamStarted && socket.readyState === socket.OPEN) {
-                socket.send(JSON.stringify({ type: "stream_end" }));
+              if (streamStarted) {
+                broadcast(agentId, JSON.stringify({ type: "stream_end" }));
                 streamStarted = false;
               }
             });
@@ -525,15 +797,21 @@ module.exports = { initWebSocket, connections, isToolRunning, markToolRunning };
       console.log("WebSocket: User disconnected");
       if (!socket.agentId) return;
 
-      if (activeStreams.has(socket.agentId)) {
-        activeStreams.get(socket.agentId).abort();
-        activeStreams.delete(socket.agentId);
-      }
-
-      markToolRunning(socket.agentId, false);
-      const current = connections.get(socket.agentId);
-      if (current === socket) {
-        connections.delete(socket.agentId);
+      // 从连接集合中移除
+      const socketSet = connections.get(socket.agentId);
+      if (socketSet) {
+        socketSet.delete(socket);
+        if (socketSet.size === 0) {
+          connections.delete(socket.agentId);
+          // 该 agentId 无连接时，中止其流
+          if (activeStreams.has(socket.agentId)) {
+            activeStreams.get(socket.agentId).abort();
+            activeStreams.delete(socket.agentId);
+          }
+          markToolRunning(socket.agentId, false);
+          // 停止文件监听
+          stopFileWatcher(socket.agentId);
+        }
       }
     });
   });
@@ -542,7 +820,15 @@ module.exports = { initWebSocket, connections, isToolRunning, markToolRunning };
     wss.clients.forEach((ws) => {
       if (ws.isAlive === false) {
         if (ws.agentId) {
-          connections.delete(ws.agentId);
+          const socketSet = connections.get(ws.agentId);
+          if (socketSet) {
+            socketSet.delete(ws);
+            if (socketSet.size === 0) {
+              connections.delete(ws.agentId);
+              // 停止文件监听
+              stopFileWatcher(ws.agentId);
+            }
+          }
         }
         return ws.terminate();
       }

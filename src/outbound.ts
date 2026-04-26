@@ -62,8 +62,13 @@ export const pushChannelOutbound: ChannelOutboundAdapter = {
     }
     console.log(`[PushChannel] outbound.sendText success: to=${resolvedAgentId}`);
     return {
+      channel: "push-channel",
       sent: new Date(),
       messageId: Date.now().toString(),
     };
+  },
+  sendMedia: async () => {
+    console.warn("[PushChannel] sendMedia not supported");
+    return { channel: "push-channel" as any, messageId: Date.now().toString() };
   },
 };

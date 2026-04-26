@@ -1,5 +1,4 @@
 import type { ServerResponse } from "node:http";
-import { getPushChannelRuntime } from "./runtime.js";
 import { sendPushMessage } from "./send.js";
 import { setWriter, clearWriter } from "./tool-store.js";
 
@@ -118,6 +117,7 @@ export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?:
     },
     waitForIdle: async () => {},
     getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
+    getFailedCounts: () => ({ tool: 0, block: 0, final: 0 }),
     markComplete: () => {
       emitToolEnd();
       if (sessionKey) clearWriter(sessionKey);
@@ -133,7 +133,6 @@ export function createPushChannelReplyDispatcher(params: {
   sessionId?: string;
 }) {
   const { middlewareUrl, agentId, sessionId } = params;
-  const runtime = getPushChannelRuntime();
 
   return {
     sendToolResult: () => true,
@@ -142,13 +141,14 @@ export function createPushChannelReplyDispatcher(params: {
       const text = payload.text || payload.content || "";
       if (text) {
         sendPushMessage({ middlewareUrl, agentId, sessionId, content: text }).catch((err) => {
-          runtime.log?.(`Failed to send reply to ${agentId}: ${err}`);
+          console.error(`Failed to send reply to ${agentId}: ${err}`);
         });
       }
       return true;
     },
     waitForIdle: async () => {},
     getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
+    getFailedCounts: () => ({ tool: 0, block: 0, final: 0 }),
     markComplete: () => {},
   };
 }

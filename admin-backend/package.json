@@ -14,14 +14,19 @@
     "@koa/cors": "^5.0.0",
     "@koa/router": "^15.4.0",
     "bcrypt": "^6.0.0",
-    "dotenv": "^17.3.1",
+    "chokidar": "^5.0.0",
+    "dotenv": "^17.4.2",
     "jsonwebtoken": "^9.0.3",
     "koa": "^3.1.2",
     "koa-bodyparser": "^4.4.1",
     "koa-router": "^14.0.0",
+    "koa-static": "^5.0.0",
     "mysql2": "^3.20.0",
+    "nacos": "^2.6.1",
     "node-fetch": "^2.7.0",
     "uuid": "^13.0.0",
+    "webdav": "^5.9.0",
+    "webdav-server": "^2.6.2",
     "ws": "^8.19.0"
   }
 }

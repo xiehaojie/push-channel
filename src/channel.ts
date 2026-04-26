@@ -2,7 +2,8 @@
 import * as http from "node:http";
 import * as https from "node:https";
 import { URL } from "node:url";
-import type { ChannelPlugin, ChannelMeta } from "openclaw/plugin-sdk";
+import type { ChannelPlugin } from "openclaw/plugin-sdk";
+import type { ChannelMeta } from "openclaw/plugin-sdk/core";
 import type { ResolvedPushChannelAccount } from "./types.js";
 import { pushChannelOutbound } from "./outbound.js";
 import { monitorPushChannel } from "./monitor.js";
@@ -132,13 +133,26 @@ export const pushChannelPlugin: ChannelPlugin<ResolvedPushChannelAccount> = {
   },
   config: {
     listAccountIds: (cfg) => listAccountIds(cfg),
-    resolveAccount: (cfg, accountId) => resolveAccountFromCfg(cfg, accountId),
+    resolveAccount: (cfg, accountId) => resolveAccountFromCfg(cfg, accountId ?? "default"),
     defaultAccountId: () => "default",
-    setAccountEnabled: () => {
-      throw new Error("Not implemented");
+    setAccountEnabled: ({ cfg, accountId, enabled }) => {
+      const root = getRootConfig(cfg);
+      if (accountId === "default") {
+        root.enabled = enabled;
+      } else {
+        const accounts = root.accounts ?? {};
+        accounts[accountId] = { ...(accounts[accountId] ?? {}), enabled };
+        root.accounts = accounts;
+      }
+      return cfg;
     },
-    deleteAccount: () => {
-      throw new Error("Not implemented");
+    deleteAccount: ({ cfg, accountId }) => {
+      if (accountId === "default") return cfg;
+      const root = getRootConfig(cfg);
+      if (root.accounts) {
+        delete root.accounts[accountId];
+      }
+      return cfg;
     },
     isConfigured: (acc) => acc.configured,
     describeAccount: (acc) => ({
@@ -159,14 +173,14 @@ export const pushChannelPlugin: ChannelPlugin<ResolvedPushChannelAccount> = {
     },
   },
   status: {
-    defaultRuntime: { port: null },
+    defaultRuntime: { accountId: "default", port: null },
     buildChannelSummary: () => ({ status: "ok" }),
     probeAccount: async (ctx) => {
       const acc = ctx.account;
       if (!acc.configured) {
         return { status: "error", error: "middlewareUrl not configured" };
       }
-      const result = await probeMiddleware(acc.config.middlewareUrl);
+      const result = await probeMiddleware(acc.config.middlewareUrl ?? "");
       return result.ok
         ? { status: "ok", error: null }
         : { status: "error", error: result.error };

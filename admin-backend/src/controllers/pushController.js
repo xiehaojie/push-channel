@@ -15,22 +15,32 @@ class PushController {
             return;
         }
 
-        const socket = connections.get(agentId);
-        if (socket) {
+        const socketSet = connections.get(agentId);
+        if (socketSet && socketSet.size > 0) {
             const chunkSize = 5;
             const delay = 50;
 
+            // 广播到该 agentId 的所有连接
+            const broadcast = (msg) => {
+                const msgStr = JSON.stringify(msg);
+                for (const sock of socketSet) {
+                    if (sock.readyState === 1) { // WebSocket.OPEN
+                        sock.send(msgStr);
+                    }
+                }
+            };
+
             const streamLoop = async () => {
-                socket.send(JSON.stringify({ type: "stream_start", from: 'Assistant', sessionId }));
+                broadcast({ type: "stream_start", from: 'Assistant', sessionId });
 
                 let currentIndex = 0;
                 while (currentIndex < content.length) {
                     const chunk = content.slice(currentIndex, currentIndex + chunkSize);
-                    socket.send(JSON.stringify({ type: "stream", content: chunk, role: 'assistant', sessionId }));
+                    broadcast({ type: "stream", content: chunk, role: 'assistant', sessionId });
                     currentIndex += chunkSize;
                     await new Promise(r => setTimeout(r, delay));
                 }
-                socket.send(JSON.stringify({ type: "stream_end", sessionId }));
+                broadcast({ type: "stream_end", sessionId });
             };
             
             streamLoop().catch(err => console.error("Streaming failed", err));
@@ -38,7 +48,7 @@ class PushController {
             ctx.status = 200;
             ctx.body = "Sent";
         } else {
-            console.log(`Agent ${agentId} not found`);
+            console.log(`Agent ${agentId} not found or no active connections`);
             ctx.status = 404;
             ctx.body = "Agent not found";
         }

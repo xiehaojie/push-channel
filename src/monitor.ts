@@ -92,7 +92,7 @@ export async function monitorPushChannel(opts: {
   abortSignal: AbortSignal;
 }): Promise<void> {
   const { config, runtime, accountId, abortSignal } = opts;
-  const log = runtime.log ?? console.log;
+  const log = (msg: string) => console.log(msg);
   const account = resolveAccount(config, accountId);
 
   const port = account.config.listenPort || 3002;

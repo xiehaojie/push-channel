@@ -2,6 +2,7 @@ const Router = require('@koa/router');
 const authController = require('./controllers/authController');
 const userController = require('./controllers/userController');
 const pushController = require('./controllers/pushController');
+const fileController = require('./controllers/fileController');
 const { authenticate, requireRole } = require('./middleware/auth');
 
 const router = new Router({ prefix: '/api' });
@@ -17,6 +18,9 @@ router.get('/users', authenticate, requireRole(['super_admin', 'admin']), userCo
 router.post('/users', authenticate, requireRole(['super_admin', 'admin']), userController.create);
 router.patch('/users/:id/status', authenticate, requireRole(['super_admin', 'admin']), userController.updateStatus);
 router.put('/users/:id', authenticate, requireRole(['super_admin', 'admin']), userController.updateUser);
+
+// File management routes
+router.get('/files/list', authenticate, fileController.listFiles);
 
 // Compat for old middleware endpoints
 router.post('/register', authController.register);
@@ -38,3 +42,4 @@ rootRouter.post('/webhook', async (ctx) => {
 });
 
 module.exports = { router, rootRouter };
+
