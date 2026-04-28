@@ -27,7 +27,30 @@ export const pushChannelPlugin: ChannelPlugin<ResolvedPushChannelAccount> = {
     reply: false,
   },
   configSchema: {
-      schema: {
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean" },
+        middlewareUrl: { type: "string" },
+        listenPort: { type: "integer" },
+        listenPath: { type: "string" },
+        allowedSenders: { type: "array", items: { type: "string" } },
+        typingEnabled: { type: "boolean" },
+        knowledgeBase: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            enabled: { type: "boolean" },
+            apiEndpoint: { type: "string" },
+            datasetId: { type: "string" },
+            token: { type: "string" },
+            searchMethod: { type: "string" },
+            topK: { type: "integer" },
+            scoreThreshold: { type: "number" },
+          },
+        },
+        accounts: {
           type: "object",
           additionalProperties: false,
           properties: {

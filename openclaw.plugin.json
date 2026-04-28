@@ -5,6 +5,20 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "knowledgeBase": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "apiEndpoint": { "type": "string" },
+          "datasetId": { "type": "string" },
+          "token": { "type": "string" },
+          "searchMethod": { "type": "string", "default": "hybrid_search" },
+          "topK": { "type": "integer", "default": 5 },
+          "scoreThreshold": { "type": "number", "default": 0.3 }
+        }
+      }
+    }
   }
 }
