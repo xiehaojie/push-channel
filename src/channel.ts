@@ -54,12 +54,14 @@ export const pushChannelPlugin: ChannelPlugin<ResolvedPushChannelAccount> = {
           type: "object",
           additionalProperties: false,
           properties: {
-              enabled: { type: "boolean" },
-              middlewareUrl: { type: "string" },
-              listenPort: { type: "integer" },
-              listenPath: { type: "string" },
-          }
-      }
+            enabled: { type: "boolean" },
+            middlewareUrl: { type: "string" },
+            listenPort: { type: "integer" },
+            listenPath: { type: "string" },
+          },
+        },
+      },
+    },
   },
   config: {
     listAccountIds: () => ["default"],
