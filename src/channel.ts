@@ -4,6 +4,22 @@ import type { ResolvedPushChannelAccount } from "./types.js";
 import { pushChannelOutbound } from "./outbound.js";
 import { monitorPushChannel } from "./monitor.js";
 
+type CachedKnowledgeBaseConfig = {
+  enabled?: boolean;
+  apiEndpoint?: string;
+  datasetId?: string;
+  token?: string;
+  searchMethod?: string;
+  topK?: number;
+  scoreThreshold?: number;
+};
+
+let cachedKnowledgeBaseConfig: CachedKnowledgeBaseConfig | undefined;
+
+export function getCachedKnowledgeBaseConfig(): CachedKnowledgeBaseConfig | undefined {
+  return cachedKnowledgeBaseConfig;
+}
+
 const meta: ChannelMeta = {
   id: "push-channel",
   label: "Push Channel",
@@ -67,6 +83,7 @@ export const pushChannelPlugin: ChannelPlugin<ResolvedPushChannelAccount> = {
     listAccountIds: () => ["default"],
     resolveAccount: (cfg, accountId) => {
         const c = (cfg.channels?.["push-channel"] as any) || {};
+      cachedKnowledgeBaseConfig = c.knowledgeBase;
         const account = {
             accountId: "default",
             enabled: c.enabled ?? false,
@@ -85,6 +102,8 @@ export const pushChannelPlugin: ChannelPlugin<ResolvedPushChannelAccount> = {
   outbound: pushChannelOutbound,
   gateway: {
       startAccount: async (ctx) => {
+        const channelConfig = (ctx.cfg.channels?.["push-channel"] as any) || {};
+        cachedKnowledgeBaseConfig = channelConfig.knowledgeBase;
           return monitorPushChannel({
               config: ctx.cfg,
               runtime: ctx.runtime,
