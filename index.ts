@@ -4,7 +4,54 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { getCachedKnowledgeBaseConfig, pushChannelPlugin } from "./src/channel.js";
 import { setPushChannelRuntime } from "./src/runtime.js";
 import { getWriter, pushToolCallId, popToolCallId } from "./src/tool-store.js";
-import { queryKnowledgeBase } from "./src/knowledge.js";
+import { queryKnowledgeBase, shouldQueryKB, type KnowledgeBaseConfig } from "./src/knowledge.js";
+
+const KNOWLEDGE_SEARCH_DESCRIPTION = [
+    "Search the configured knowledge base for relevant internal or product documentation.",
+    "Primary boundary: use this tool to retrieve knowledge-base content, not to answer directly.",
+    "When executing a skill, call this only if the skill's own instructions/references are insufficient or cannot answer the needed detail.",
+    "Outside a skill, call this when the user explicitly asks to search the knowledge base/internal docs, or when the answer would otherwise be uncertain/ambiguous and the knowledge base is likely to contain the authoritative answer.",
+    "Do not call this for greetings, acknowledgements, small talk, simple commands, general reasoning, coding tasks, calculations, translation, or questions you can answer confidently from the conversation.",
+    "Before calling, rewrite the user's need into a concise search query with key entities, product names, policy names, or error messages.",
+].join(" ");
+
+function textResult(text: string) {
+    return { content: [{ type: "text", text }] };
+}
+
+function readString(value: unknown): string {
+    return typeof value === "string" ? value.trim() : "";
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+    return value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : undefined;
+}
+
+function readPositiveInteger(value: unknown, fallback: number): number {
+    return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function readNumber(value: unknown, fallback: number): number {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function resolveKnowledgeBaseConfig(rawConfig: unknown): KnowledgeBaseConfig | null {
+    const config = asRecord(rawConfig);
+    const kbConfig = asRecord(config?.knowledgeBase);
+    if (!kbConfig) return null;
+
+    return {
+        enabled: kbConfig.enabled !== false,
+        apiEndpoint: readString(kbConfig.apiEndpoint),
+        datasetId: readString(kbConfig.datasetId),
+        token: readString(kbConfig.token),
+        searchMethod: readString(kbConfig.searchMethod) || "hybrid_search",
+        topK: readPositiveInteger(kbConfig.topK, 5),
+        scoreThreshold: readNumber(kbConfig.scoreThreshold, 0.3),
+    };
+}
 
 type KnowledgeBaseLikeConfig = {
     enabled?: boolean;
@@ -121,66 +168,49 @@ export default {
             writer({ type: "tool_result", toolCallId, message: event["message"] });
         });
 
-        // Knowledge base retrieval: inject KB results into system context on every message.
-        api.on("before_prompt_build", async (event) => {
-                    const log = (message: string) => {
-                        if (typeof runtimeLogger === "function") {
-                            runtimeLogger(message);
-                            return;
-                        }
-                        console.info(message);
-                    };
+        // Knowledge search tool: constrained retrieval for authoritative KB-backed answers.
+        api.registerTool(
+          {
+            name: "knowledge_search",
+            label: "Knowledge Search",
+            description: KNOWLEDGE_SEARCH_DESCRIPTION,
+            parameters: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                query: {
+                  type: "string",
+                  minLength: 2,
+                  description: "Concise, focused search query rewritten from the user's need.",
+                },
+              },
+              required: ["query"],
+            },
+            async execute(_toolCallId: string, params: Record<string, unknown>) {
+              const query = readString(params.query);
+              if (!query) {
+                return textResult("Knowledge search was skipped because the query is empty.");
+              }
+              if (!shouldQueryKB(query)) {
+                return textResult("Knowledge search was skipped because the query looks conversational or too small to retrieve reliable context.");
+              }
 
-                    log("[PushChannel][KB] before_prompt_build triggered");
+              const kbConfig = resolveKnowledgeBaseConfig(api.pluginConfig);
+              if (!kbConfig?.enabled) {
+                return textResult("Knowledge base is disabled.");
+              }
+              if (!kbConfig.apiEndpoint || !kbConfig.datasetId || !kbConfig.token) {
+                return textResult("Knowledge base is not fully configured. Missing apiEndpoint, datasetId, or token.");
+              }
 
-          const resolved = resolveKnowledgeBaseConfig(api, event);
-          const kbConfig = resolved.config;
-          log(`[PushChannel][KB] config source=${resolved.source}`);
-                    if (!kbConfig?.enabled || !kbConfig?.apiEndpoint || !kbConfig?.datasetId) {
-                        log(`[PushChannel][KB] diagnostics pluginConfigKeys=${keysOf(api.pluginConfig)}`);
-                        log(`[PushChannel][KB] diagnostics eventKeys=${keysOf(event)}`);
-                        log("[PushChannel][KB] skipped: missing or disabled knowledgeBase config");
-                        return {};
-                    }
-
-                    const strictKbConfig = {
-                        enabled: true,
-                        apiEndpoint: kbConfig.apiEndpoint,
-                        datasetId: kbConfig.datasetId,
-                        token: kbConfig.token,
-                        searchMethod: kbConfig.searchMethod,
-                        topK: kbConfig.topK,
-                        scoreThreshold: kbConfig.scoreThreshold,
-                        timeoutMs: kbConfig.timeoutMs,
-                    };
-
-                    const prompt = typeof event.prompt === "string" ? event.prompt : "";
-                    log(`[PushChannel][KB] querying knowledge base (promptLength=${prompt.length})`);
-
-                    let results: string | null = null;
-                    try {
-                        results = await queryKnowledgeBase(prompt, strictKbConfig);
-                    } catch (error) {
-                        const reason = error instanceof Error ? error.message : String(error);
-                        log(`[PushChannel][KB] query failed: ${reason}`);
-                        return {};
-                    }
-
-                    if (!results) {
-                        log("[PushChannel][KB] no knowledge retrieved (empty result or upstream unavailable)");
-                        return {};
-                    }
-
-                    log(`[PushChannel][KB] knowledge retrieved (chars=${results.length})`);
-                    log(`[PushChannel][KB] knowledge content:\n${results}`);
-
-          return {
-            appendSystemContext:
-              `<knowledge_base>\n${results}\n</knowledge_base>\n\n` +
-              `以上是从知识库中检索到的参考资料。回答用户问题时，请优先基于上述知识库内容进行回答。` +
-              `如果知识库内容与用户问题相关，请直接引用其中的信息。` +
-              `如果知识库内容不相关，可以忽略。`,
-          };
-        });
+              const results = await queryKnowledgeBase(query, kbConfig);
+              if (!results) {
+                return textResult("No relevant knowledge base results found.");
+              }
+              return textResult(results);
+            },
+          },
+          { name: "knowledge_search" },
+        );
     },
 };

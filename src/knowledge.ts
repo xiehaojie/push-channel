@@ -88,9 +88,13 @@ export async function queryKnowledgeBase(
     }
 
     const body = JSON.stringify({
-      knowledge_id: config.datasetId,
-      query,
-      retrieval_setting: retrievalSetting,
+      dataset_id: config.datasetId,
+      query: userMessage,
+      retrieval_setting: {
+        search_method: config.searchMethod || "hybrid_search",
+        top_k: config.topK || 5,
+        score_threshold: config.scoreThreshold ?? 0.3,
+      },
     });
     console.info(`[PushChannel][KB] queryKnowledgeBase: request body = ${body}`);
 
@@ -204,6 +208,22 @@ function postJson(
       finish(null);
     }
   });
+}
+
+export function shouldQueryKB(message: string): boolean {
+  const trimmed = message
+    .trim()
+    .replace(/^[\s"'“”‘’]+|[\s"'“”‘’.,!?;:。！？；：~～…]+$/g, "");
+  if (trimmed.length < 2) return false;
+
+  const skipPatterns = [
+    /^(您好|你好|谢谢|好的|是的?|确认|收到|ok|okay|thanks|thank you|hello|hi|hi there|嗯|对|不是|不行|可以|no|yes|👍|🙏|哈哈|嘿嘿|😊|okk|👌|拜拜|再见|晚安|早上好|下午好|辛苦了|了解|明白|知道了|没问题|行|好)$/i,
+  ];
+
+  if (skipPatterns.some((p) => p.test(trimmed))) return false;
+  if (trimmed.length >= 4) return true;
+
+  return /[A-Za-z0-9]/.test(trimmed) || /[\u4e00-\u9fff]{2,}/.test(trimmed);
 }
 
 function formatRecords(records: RetrievalRecord[] | undefined): string | null {
