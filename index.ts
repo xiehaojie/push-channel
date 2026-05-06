@@ -1,7 +1,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { getCachedKnowledgeBaseConfig, pushChannelPlugin } from "./src/channel.js";
+import { pushChannelPlugin } from "./src/channel.js";
 import { setPushChannelRuntime } from "./src/runtime.js";
 import { getWriter, pushToolCallId, popToolCallId } from "./src/tool-store.js";
 import { queryKnowledgeBase, shouldQueryKB, type KnowledgeBaseConfig } from "./src/knowledge.js";
@@ -51,87 +51,6 @@ function resolveKnowledgeBaseConfig(rawConfig: unknown): KnowledgeBaseConfig | n
         topK: readPositiveInteger(kbConfig.topK, 5),
         scoreThreshold: readNumber(kbConfig.scoreThreshold, 0.3),
     };
-}
-
-type KnowledgeBaseLikeConfig = {
-    enabled?: boolean;
-    apiEndpoint?: string;
-    datasetId?: string;
-    token?: string;
-    searchMethod?: string;
-    topK?: number;
-    scoreThreshold?: number;
-    timeoutMs?: number;
-};
-
-function readKbFromObject(input: unknown): KnowledgeBaseLikeConfig | undefined {
-    if (!input || typeof input !== "object") {
-        return undefined;
-    }
-
-    const obj = input as {
-        knowledgeBase?: KnowledgeBaseLikeConfig;
-        channels?: {
-            "push-channel"?: {
-                knowledgeBase?: KnowledgeBaseLikeConfig;
-            };
-        };
-        "push-channel"?: {
-            knowledgeBase?: KnowledgeBaseLikeConfig;
-        };
-    };
-
-    return (
-        obj.channels?.["push-channel"]?.knowledgeBase ??
-        obj["push-channel"]?.knowledgeBase ??
-        obj.knowledgeBase
-    );
-}
-
-function isUsableKnowledgeBaseConfig(config: KnowledgeBaseLikeConfig | undefined): boolean {
-    if (!config) {
-        return false;
-    }
-
-    if (config.enabled === false) {
-        return true;
-    }
-
-    return Boolean(config.enabled && config.apiEndpoint && config.datasetId);
-}
-
-function resolveKnowledgeBaseConfig(
-    api: OpenClawPluginApi,
-    event: unknown,
-): { source: string; config?: KnowledgeBaseLikeConfig } {
-    const eventObj = event as { cfg?: unknown; config?: unknown } | undefined;
-    const runtimeObj = api.runtime as { cfg?: unknown; config?: unknown } | undefined;
-
-    const candidates: Array<{ source: string; value: unknown }> = [
-        { source: "api.pluginConfig", value: api.pluginConfig },
-        { source: "event", value: event },
-        { source: "event.cfg", value: eventObj?.cfg },
-        { source: "event.config", value: eventObj?.config },
-        { source: "runtime.cfg", value: runtimeObj?.cfg },
-        { source: "runtime.config", value: runtimeObj?.config },
-        { source: "channel.cache", value: getCachedKnowledgeBaseConfig() },
-    ];
-
-    for (const candidate of candidates) {
-        const config = readKbFromObject(candidate.value);
-        if (isUsableKnowledgeBaseConfig(config)) {
-            return { source: candidate.source, config };
-        }
-    }
-
-    return { source: "none", config: undefined };
-}
-
-function keysOf(input: unknown): string {
-    if (!input || typeof input !== "object") {
-        return "<not-object>";
-    }
-    return Object.keys(input as Record<string, unknown>).join(",") || "<empty>";
 }
 
 export default {
