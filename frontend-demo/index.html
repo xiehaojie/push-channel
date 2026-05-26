@@ -10,67 +10,67 @@
 
 <body>
     <div id="app">
-        <div id="auth-container">
-            <h2 id="auth-title">Login</h2>
-            <div class="tab-bar">
-                <button id="tab-login" class="tab active" onclick="switchTab('login')">Login</button>
-                <button id="tab-register" class="tab" onclick="switchTab('register')">Register</button>
+        <section id="setup-panel">
+            <div class="setup-heading">
+                <div>
+                    <h1>OpenClaw Chat</h1>
+                    <p id="connection-status">Disconnected</p>
+                </div>
+                <button id="disconnect-btn" type="button" disabled>Disconnect</button>
             </div>
 
-            <form id="login-form">
-                <input type="text" id="login-username" placeholder="Username" required>
-                <input type="password" id="login-password" placeholder="Password" required>
-                <button type="submit">Login</button>
+            <form id="connect-form" class="setup-grid">
+                <label>
+                    Middleware URL
+                    <input type="text" id="server-url-input" value="http://localhost:3001" required>
+                </label>
+                <label>
+                    User Agent ID
+                    <input type="text" id="agent-id-input" value="demo-agent" required>
+                </label>
+                <label>
+                    OpenClaw Agent
+                    <input type="text" id="openclaw-agent-id-input" value="main" required>
+                </label>
+                <label>
+                    Session ID
+                    <input type="text" id="session-id-input" required>
+                </label>
+                <button type="submit" id="connect-btn">Connect</button>
             </form>
+        </section>
 
-            <form id="register-form" style="display:none;">
-                <input type="text" id="reg-agent-id" placeholder="Agent ID" required>
-                <input type="text" id="reg-username" placeholder="Username" required>
-                <input type="password" id="reg-password" placeholder="Password" required>
-                <input type="text" id="reg-name" placeholder="Display name" required>
-                <input type="email" id="reg-email" placeholder="Email" required>
-                <button type="submit">Register</button>
-            </form>
-
-            <p id="auth-error" class="error"></p>
-        </div>
-
-        <div id="chat-container" style="display: none;">
-            <div id="chat-header">
-                <div class="header-left">
-                    <h2>OpenClaw Chat</h2>
-                    <span id="agent-display" class="session-label"></span>
-                </div>
-                <div class="header-right">
-                    <span id="tool-status" class="tool-status" style="display:none;">Tools running...</span>
-                    <label for="session-id-input">Session:</label>
-                    <input type="text" id="session-id-input" placeholder="chat-session">
-                    <button id="logout-btn">Logout</button>
-                </div>
+        <section id="chat-container">
+            <div id="chat-toolbar">
+                <span id="agent-display">No agent connected</span>
+                <span id="tool-status" class="tool-status" hidden>Tools running...</span>
             </div>
-            <div id="messages"></div>
+            <div id="messages" aria-live="polite"></div>
             <form id="message-form">
-                <input type="text" id="message-input" placeholder="Type a message..." required>
-                <button type="submit">Send</button>
+                <input type="text" id="message-input" placeholder="Type a message..." required disabled>
+                <button type="submit" id="send-btn" disabled>Send</button>
             </form>
-        </div>
+        </section>
     </div>
 
     <script src="sdk.js"></script>
     <script>
-        const API_BASE = 'http://localhost:3001';
         let sdk = null;
+        let isToolRunning = false;
+        const localQueryIds = new Set();
 
-        const authError = document.getElementById('auth-error');
-        const authContainer = document.getElementById('auth-container');
-        const chatContainer = document.getElementById('chat-container');
+        const connectForm = document.getElementById('connect-form');
+        const disconnectBtn = document.getElementById('disconnect-btn');
+        const serverUrlInput = document.getElementById('server-url-input');
+        const agentIdInput = document.getElementById('agent-id-input');
+        const sessionIdInput = document.getElementById('session-id-input');
+        const connectionStatus = document.getElementById('connection-status');
         const agentDisplay = document.getElementById('agent-display');
         const messagesDiv = document.getElementById('messages');
         const messageForm = document.getElementById('message-form');
         const messageInput = document.getElementById('message-input');
-        const sessionIdInput = document.getElementById('session-id-input');
+        const sendBtn = document.getElementById('send-btn');
         const toolStatus = document.getElementById('tool-status');
-        let isToolRunning = false;
 
         function createSessionId(agentId) {
             if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -79,122 +79,136 @@
             return `${agentId}-${Date.now()}`;
         }
 
+        function setConnected(connected) {
+            messageInput.disabled = !connected;
+            sendBtn.disabled = !connected;
+            disconnectBtn.disabled = !connected;
+            connectForm.querySelectorAll('input, button').forEach((element) => {
+                element.disabled = connected;
+            });
+        }
+
         function updateToolStatus() {
-            if (!toolStatus) return;
-            toolStatus.style.display = isToolRunning ? 'inline-flex' : 'none';
+            toolStatus.hidden = !isToolRunning;
         }
 
-        function switchTab(tab) {
-            document.getElementById('login-form').style.display = tab === 'login' ? '' : 'none';
-            document.getElementById('register-form').style.display = tab === 'register' ? '' : 'none';
-            document.getElementById('tab-login').classList.toggle('active', tab === 'login');
-            document.getElementById('tab-register').classList.toggle('active', tab === 'register');
-            document.getElementById('auth-title').textContent = tab === 'login' ? 'Login' : 'Register';
-            authError.textContent = '';
+        function isCurrentSession(data) {
+            return !data.sessionId || data.sessionId === sessionIdInput.value.trim();
         }
 
-        document.getElementById('login-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            authError.textContent = '';
-            const username = document.getElementById('login-username').value;
-            const password = document.getElementById('login-password').value;
-            try {
-                const res = await fetch(`${API_BASE}/api/auth/login`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    startChat(data.data.agentId);
-                } else {
-                    authError.textContent = data.message || 'Login failed';
-                }
-            } catch {
-                authError.textContent = 'Network error';
+        function appendText(parent, text) {
+            parent.appendChild(document.createTextNode(text));
+        }
+
+        function appendMessage(sender, text, className, meta = {}) {
+            const div = document.createElement('div');
+            div.className = `message ${className}`;
+            if (meta.answerMessageId) div.dataset.answerMessageId = meta.answerMessageId;
+            if (meta.queryMessageId) div.dataset.queryMessageId = meta.queryMessageId;
+            if (meta.sessionId) div.dataset.sessionId = meta.sessionId;
+
+            const label = document.createElement('strong');
+            label.textContent = sender;
+            const content = document.createElement('span');
+            content.className = 'content';
+            appendText(content, text);
+
+            div.append(label, content);
+            messagesDiv.appendChild(div);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            return div;
+        }
+
+        function appendSystemMessage(text) {
+            appendMessage('System', text, 'system');
+        }
+
+        function streamSelector(data) {
+            if (data.answerMessageId) {
+                return `.stream-active[data-answer-message-id="${CSS.escape(data.answerMessageId)}"] .content`;
             }
-        });
-
-        document.getElementById('register-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            authError.textContent = '';
-            const agentId = document.getElementById('reg-agent-id').value.trim();
-            const username = document.getElementById('reg-username').value;
-            const password = document.getElementById('reg-password').value;
-            const name = document.getElementById('reg-name').value;
-            const email = document.getElementById('reg-email').value;
-            try {
-                const res = await fetch(`${API_BASE}/api/auth/register`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ agentId, username, password, name, email })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    startChat(data.data.agentId);
-                } else {
-                    authError.textContent = data.message || 'Registration failed';
-                }
-            } catch {
-                authError.textContent = 'Network error';
+            if (data.sessionId) {
+                return `.stream-active[data-session-id="${CSS.escape(data.sessionId)}"] .content`;
             }
-        });
+            return '.stream-active .content';
+        }
 
-        function startChat(agentId) {
-            authContainer.style.display = 'none';
-            chatContainer.style.display = 'flex';
-            agentDisplay.textContent = `Agent: ${agentId}`;
-            sessionIdInput.value = createSessionId(agentId);
+        function ensureStream(data) {
+            let content = messagesDiv.querySelector(streamSelector(data));
+            if (content) return content;
 
-            sdk = new PushChannelSDK(`${API_BASE}`, agentId);
+            const div = appendMessage(data.from || 'Assistant', '', 'bot stream-active', data);
+            return div.querySelector('.content');
+        }
 
-            sdk.onMessage((msg) => appendMessage('Bot', msg));
+        function finalizeStream(data) {
+            const selector = data.answerMessageId
+                ? `.stream-active[data-answer-message-id="${CSS.escape(data.answerMessageId)}"]`
+                : '.stream-active';
+            const active = messagesDiv.querySelector(selector);
+            if (active) active.classList.remove('stream-active');
+        }
 
-            sdk.onStreamStart((from) => {
-                const div = document.createElement('div');
-                div.className = 'message bot stream-active';
-                div.innerHTML = `<strong>${from || 'Assistant'}:</strong> <span class="content"></span>`;
-                messagesDiv.appendChild(div);
+        function attachSdkHandlers() {
+            sdk.onRegistered((data) => {
+                connectionStatus.textContent = 'Connected';
+                agentDisplay.textContent = `Agent: ${data.agentId}`;
+                setConnected(true);
+                messageInput.focus();
+            });
+
+            sdk.onMessageSent((data) => {
+                if (!isCurrentSession(data)) return;
+                if (data.queryMessageId && localQueryIds.has(data.queryMessageId)) return;
+                appendMessage('User', data.content || '', 'you', data);
+            });
+
+            sdk.onMessage((data) => {
+                if (!isCurrentSession(data)) return;
+                appendMessage('Assistant', data.content || '', 'bot', data);
+            });
+
+            sdk.onStreamStart((data) => {
+                if (!isCurrentSession(data)) return;
+                ensureStream(data);
+            });
+
+            sdk.onStreamChunk((data) => {
+                if (!isCurrentSession(data)) return;
+                const activeStream = ensureStream(data);
+                activeStream.textContent += data.content || '';
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
             });
 
-            sdk.onStreamChunk((chunk) => {
-                let activeStream = messagesDiv.querySelector('.stream-active .content');
-                if (!activeStream) {
-                    const div = document.createElement('div');
-                    div.className = 'message bot stream-active';
-                    div.innerHTML = `<strong>Assistant:</strong> <span class="content"></span>`;
-                    messagesDiv.appendChild(div);
-                    activeStream = div.querySelector('.content');
-                }
-                activeStream.textContent += chunk;
+            sdk.onStreamSnapshot((data) => {
+                if (!isCurrentSession(data)) return;
+                const activeStream = ensureStream(data);
+                activeStream.textContent = data.snapshot || '';
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
             });
 
-            sdk.onStreamEnd(() => {
-                const active = messagesDiv.querySelector('.stream-active');
-                if (active) active.classList.remove('stream-active');
+            sdk.onStreamEnd((data) => {
+                if (!isCurrentSession(data)) return;
+                finalizeStream(data);
             });
 
-            sdk.onToolCall((toolCallId, toolName, args) => {
-                const div = document.createElement('div');
-                div.className = 'message system tool-call';
-                div.dataset.toolCallId = toolCallId;
-                const argsStr = args && Object.keys(args).length > 0
-                    ? JSON.stringify(args, null, 2)
+            sdk.onToolCall((data) => {
+                if (!isCurrentSession(data)) return;
+                const div = appendMessage('Tool', data.toolName || 'tool_call', 'system tool-call', data);
+                div.dataset.toolCallId = data.toolCallId || '';
+                const args = document.createElement('pre');
+                args.className = 'tool-args';
+                args.textContent = data.args && Object.keys(data.args).length > 0
+                    ? JSON.stringify(data.args, null, 2)
                     : '(no args)';
-                div.innerHTML = `<span><strong>${toolName}</strong><pre class="tool-args">${argsStr}</pre></span>`;
-                messagesDiv.appendChild(div);
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                div.appendChild(args);
             });
 
-            sdk.onToolResult((toolCallId) => {
-                const card = messagesDiv.querySelector(`.tool-call[data-tool-call-id="${CSS.escape(toolCallId)}"]`);
-                if (card) {
-                    card.classList.add('tool-done');
-                    const strong = card.querySelector('strong');
-                    if (strong) strong.insertAdjacentText('beforebegin', 'done ');
-                }
+            sdk.onToolResult((data) => {
+                if (!isCurrentSession(data)) return;
+                const id = data.toolCallId || '';
+                const card = messagesDiv.querySelector(`.tool-call[data-tool-call-id="${CSS.escape(id)}"]`);
+                if (card) card.classList.add('tool-done');
             });
 
             sdk.onToolStart(() => {
@@ -209,48 +223,69 @@
                 appendSystemMessage('Tools finished.');
             });
 
-            sdk.onTimeoutDeferred((msg) => {
-                appendSystemMessage(msg || 'Tools are still running. Waiting for follow-up.');
+            sdk.onTimeoutDeferred((data) => {
+                appendSystemMessage(data.message || 'Tools are still running. Waiting for follow-up.');
             });
 
-            sdk.connect();
+            sdk.onError((data) => {
+                appendSystemMessage(data.message || 'WebSocket error');
+            });
+
+            sdk.onClose(() => {
+                isToolRunning = false;
+                updateToolStatus();
+                setConnected(false);
+                connectionStatus.textContent = 'Disconnected';
+                agentDisplay.textContent = 'No agent connected';
+            });
         }
 
-        messageForm.addEventListener('submit', (e) => {
-            e.preventDefault();
+        connectForm.addEventListener('submit', (event) => {
+            event.preventDefault();
+            const url = serverUrlInput.value.trim();
+            const agentId = agentIdInput.value.trim();
+            if (!sessionIdInput.value.trim()) {
+                sessionIdInput.value = createSessionId(agentId);
+            }
+
+            if (sdk) sdk.disconnect();
+            messagesDiv.innerHTML = '';
+            connectionStatus.textContent = 'Connecting...';
+            sdk = new PushChannelSDK(url, agentId, {
+                sessionId: sessionIdInput.value.trim(),
+            });
+            attachSdkHandlers();
+            sdk.connect();
+        });
+
+        messageForm.addEventListener('submit', (event) => {
+            event.preventDefault();
             const text = messageInput.value.trim();
             const sessionId = sessionIdInput.value.trim();
-            if (text && sdk) {
-                appendMessage('You', text);
-                sdk.sendMessage(text, sessionId);
-                messageInput.value = '';
+            if (!text || !sdk) return;
+
+            const queryMessageId = `query-${Date.now()}`;
+            const answerMessageId = `answer-${Date.now()}`;
+            localQueryIds.add(queryMessageId);
+            appendMessage('You', text, 'you', { queryMessageId, sessionId });
+            sdk.sendMessage(text, sessionId, {
+                queryMessageId,
+                answerMessageId,
+            });
+            messageInput.value = '';
+        });
+
+        disconnectBtn.addEventListener('click', () => {
+            if (sdk) {
+                sdk.disconnect();
+                sdk = null;
             }
         });
 
-        document.getElementById('logout-btn').addEventListener('click', () => {
-            if (sdk) { sdk.disconnect(); sdk = null; }
-            isToolRunning = false;
-            updateToolStatus();
-            chatContainer.style.display = 'none';
-            authContainer.style.display = '';
-            messagesDiv.innerHTML = '';
+        sessionIdInput.value = createSessionId(agentIdInput.value.trim());
+        agentIdInput.addEventListener('change', () => {
+            sessionIdInput.value = createSessionId(agentIdInput.value.trim());
         });
-
-        function appendMessage(sender, text) {
-            const div = document.createElement('div');
-            div.className = `message ${sender === 'You' ? 'you' : 'bot'}`;
-            div.innerHTML = `<strong>${sender}:</strong> <span>${text}</span>`;
-            messagesDiv.appendChild(div);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        }
-
-        function appendSystemMessage(text) {
-            const div = document.createElement('div');
-            div.className = 'message system';
-            div.innerHTML = `<span>${text}</span>`;
-            messagesDiv.appendChild(div);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        }
     </script>
 </body>
 

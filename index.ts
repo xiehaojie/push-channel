@@ -1,41 +1,58 @@
-
 import { randomUUID } from "node:crypto";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { pushChannelPlugin } from "./src/channel.js";
-import { setPushChannelRuntime } from "./src/runtime.js";
+import {
+  defineBundledChannelEntry,
+  type OpenClawPluginApi,
+} from "openclaw/plugin-sdk/channel-entry-contract";
 import { getWriter, pushToolCallId, popToolCallId } from "./src/tool-store.js";
 
-export default {
-    id: "push-channel",
-    name: "Push Channel",
-    register(api: OpenClawPluginApi) {
-        setPushChannelRuntime(api.runtime);
-        api.registerChannel({ plugin: pushChannelPlugin });
-
-        // Emit tool_call event when a tool is about to execute.
-        api.on("before_tool_call", (event: { toolName: string; params?: Record<string, unknown> }, ctx: { sessionKey?: string }) => {
-            const sk = ctx.sessionKey;
-            if (!sk) return;
-            const writer = getWriter(sk);
-            if (!writer) return;
-            const toolCallId = `tool-${randomUUID()}`;
-            writer({
-                type: "tool_call",
-                toolCallId,
-                toolName: event.toolName,
-                args: event.params ?? {},
-            });
-            pushToolCallId(sk, toolCallId);
-        });
-
-        // Emit tool_result event when the tool result is persisted.
-        api.on("tool_result_persist", (_event: Record<string, unknown>, ctx: { sessionKey?: string }) => {
-            const sk = ctx.sessionKey;
-            if (!sk) return;
-            const writer = getWriter(sk);
-            const toolCallId = popToolCallId(sk);
-            if (!writer || !toolCallId) return;
-            writer({ type: "tool_result", toolCallId });
-        });
+function registerStreamingToolHooks(api: Pick<OpenClawPluginApi, "on">): void {
+  api.on("before_tool_call", (event, ctx) => {
+    const sessionKey = ctx.sessionKey;
+    if (!sessionKey) {
+      return;
     }
-};
+    const writer = getWriter(sessionKey);
+    if (!writer) {
+      return;
+    }
+
+    const toolCallId = event.toolCallId ?? ctx.toolCallId ?? `tool-${randomUUID()}`;
+    writer({
+      type: "tool_call",
+      toolCallId,
+      toolName: event.toolName,
+      args: event.params,
+    });
+    pushToolCallId(sessionKey, toolCallId);
+  });
+
+  api.on("tool_result_persist", (event, ctx) => {
+    const sessionKey = ctx.sessionKey;
+    if (!sessionKey) {
+      return;
+    }
+    const writer = getWriter(sessionKey);
+    const pendingToolCallId = popToolCallId(sessionKey);
+    const toolCallId = event.toolCallId ?? ctx.toolCallId ?? pendingToolCallId;
+    if (!writer || !toolCallId) {
+      return;
+    }
+    writer({ type: "tool_result", toolCallId });
+  });
+}
+
+export default defineBundledChannelEntry({
+  id: "push-channel",
+  name: "Push Channel",
+  description: "Push channel plugin for OpenClaw",
+  importMetaUrl: import.meta.url,
+  plugin: {
+    specifier: "./src/channel.js",
+    exportName: "pushChannelPlugin",
+  },
+  runtime: {
+    specifier: "./src/runtime.js",
+    exportName: "setPushChannelRuntime",
+  },
+  registerFull: registerStreamingToolHooks,
+});

@@ -1,4 +1,12 @@
-const { connections } = require('../websocket/index');
+const { connections, broadcastToSession } = require('../websocket/index');
+const streamCounters = new Map();
+
+function nextAnswerMessageId(agentId, sessionId) {
+    const key = `${agentId}:${sessionId}`;
+    const next = (streamCounters.get(key) || 0) + 1;
+    streamCounters.set(key, next);
+    return `push-${key}-${next}`;
+}
 
 class PushController {
     async send(ctx) {
@@ -15,22 +23,38 @@ class PushController {
             return;
         }
 
-        const socket = connections.get(agentId);
-        if (socket) {
+        const sockets = connections.get(agentId);
+        if (sockets && sockets.size > 0) {
             const chunkSize = 5;
             const delay = 50;
+            const answerMessageId = nextAnswerMessageId(agentId, sessionId || agentId);
 
             const streamLoop = async () => {
-                socket.send(JSON.stringify({ type: "stream_start", from: 'Assistant', sessionId }));
+                broadcastToSession(agentId, sessionId, {
+                    type: "stream_start",
+                    from: 'Assistant',
+                    sessionId,
+                    answerMessageId
+                });
 
                 let currentIndex = 0;
                 while (currentIndex < content.length) {
                     const chunk = content.slice(currentIndex, currentIndex + chunkSize);
-                    socket.send(JSON.stringify({ type: "stream", content: chunk, role: 'assistant', sessionId }));
+                    broadcastToSession(agentId, sessionId, {
+                        type: "stream",
+                        content: chunk,
+                        role: 'assistant',
+                        sessionId,
+                        answerMessageId
+                    });
                     currentIndex += chunkSize;
                     await new Promise(r => setTimeout(r, delay));
                 }
-                socket.send(JSON.stringify({ type: "stream_end", sessionId }));
+                broadcastToSession(agentId, sessionId, {
+                    type: "stream_end",
+                    sessionId,
+                    answerMessageId
+                });
             };
             
             streamLoop().catch(err => console.error("Streaming failed", err));

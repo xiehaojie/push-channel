@@ -1,18 +1,33 @@
-
-import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk/channel-runtime";
+import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk/channel-contract";
+import { PUSH_CHANNEL_ID, resolvePushChannelConfig } from "./config.js";
 import { sendPushMessage } from "./send.js";
 
 export const pushChannelOutbound: ChannelOutboundAdapter = {
-    deliveryMode: "direct",
-    sendText: async ({ cfg, to, text }) => {
-        const middlewareUrl = (cfg as any).channels?.["push-channel"]?.middlewareUrl;
-        if (!middlewareUrl) throw new Error("[PushChannel] middlewareUrl not configured");
-        console.log(`[PushChannel] outbound.sendText: to=${to}, middlewareUrl=${middlewareUrl}, text length=${text.length}`);
-        await sendPushMessage(middlewareUrl, to, text);
-        console.log(`[PushChannel] outbound.sendText success: to=${to}`);
-        return {
-            sent: new Date(),
-            messageId: Date.now().toString(),
-        };
+  deliveryMode: "direct",
+  deliveryCapabilities: {
+    durableFinal: {
+      text: true,
+    },
+  },
+  sendText: async ({ cfg, to, text, threadId }) => {
+    const config = resolvePushChannelConfig(cfg);
+    if (!config.middlewareUrl) {
+      throw new Error("[PushChannel] middlewareUrl not configured");
     }
+    const sessionId = threadId == null ? to : String(threadId);
+
+    await sendPushMessage({
+      middlewareUrl: config.middlewareUrl,
+      agentId: to,
+      sessionId,
+      content: text,
+    });
+
+    return {
+      channel: PUSH_CHANNEL_ID,
+      messageId: `push-${Date.now()}`,
+      timestamp: Date.now(),
+      conversationId: sessionId,
+    };
+  },
 };

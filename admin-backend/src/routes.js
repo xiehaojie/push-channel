@@ -2,21 +2,20 @@ const Router = require('@koa/router');
 const authController = require('./controllers/authController');
 const userController = require('./controllers/userController');
 const pushController = require('./controllers/pushController');
-const { authenticate, requireRole } = require('./middleware/auth');
 
 const router = new Router({ prefix: '/api' });
 
 // Auth routes
 router.post('/auth/login', authController.login);
 router.post('/auth/register', authController.register);
-router.get('/auth/session', authenticate, authController.session);
-router.post('/auth/logout', authenticate, authController.logout);
+router.get('/auth/session', authController.session);
+router.post('/auth/logout', authController.logout);
 
 // User management routes
-router.get('/users', authenticate, requireRole(['super_admin', 'admin']), userController.list);
-router.post('/users', authenticate, requireRole(['super_admin', 'admin']), userController.create);
-router.patch('/users/:id/status', authenticate, requireRole(['super_admin', 'admin']), userController.updateStatus);
-router.put('/users/:id', authenticate, requireRole(['super_admin', 'admin']), userController.updateUser);
+router.get('/users', userController.list);
+router.post('/users', userController.create);
+router.patch('/users/:id/status', userController.updateStatus);
+router.put('/users/:id', userController.updateUser);
 
 // Compat for old middleware endpoints
 router.post('/register', authController.register);
