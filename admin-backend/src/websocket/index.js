@@ -247,6 +247,9 @@ function processSSEEvent(agentId, line, sessionId, queryMessageId, baseAnswerMes
   } else if (event.type === "tool_result") {
     closeStartedStream(context, messages);
     const payload = { type: "tool_result", toolCallId: event.toolCallId };
+    if (event.toolName) payload.toolName = event.toolName;
+    if (event.content !== undefined) payload.content = event.content;
+    if (event.isError !== undefined) payload.isError = event.isError;
     if (context.sessionId) payload.sessionId = context.sessionId;
     messages.push(appendMessageIds(payload, context));
   } else if (event.type === "tool_start") {

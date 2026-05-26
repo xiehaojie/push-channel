@@ -96,6 +96,27 @@
             return !data.sessionId || data.sessionId === sessionIdInput.value.trim();
         }
 
+        function extractToolResultText(content) {
+            if (content == null) return null;
+            if (typeof content === 'string') return content;
+            if (Array.isArray(content)) {
+                const parts = content
+                    .map((block) => {
+                        if (block == null) return '';
+                        if (typeof block === 'string') return block;
+                        if (typeof block.text === 'string') return block.text;
+                        return JSON.stringify(block);
+                    })
+                    .filter(Boolean);
+                return parts.length > 0 ? parts.join('\n') : null;
+            }
+            try {
+                return JSON.stringify(content, null, 2);
+            } catch {
+                return String(content);
+            }
+        }
+
         function appendText(parent, text) {
             parent.appendChild(document.createTextNode(text));
         }
@@ -208,7 +229,17 @@
                 if (!isCurrentSession(data)) return;
                 const id = data.toolCallId || '';
                 const card = messagesDiv.querySelector(`.tool-call[data-tool-call-id="${CSS.escape(id)}"]`);
-                if (card) card.classList.add('tool-done');
+                if (card) {
+                    card.classList.add('tool-done');
+                    if (data.isError) card.classList.add('tool-error');
+                    const resultText = extractToolResultText(data.content);
+                    if (resultText !== null) {
+                        const pre = document.createElement('pre');
+                        pre.className = 'tool-result';
+                        pre.textContent = resultText;
+                        card.appendChild(pre);
+                    }
+                }
             });
 
             sdk.onToolStart(() => {

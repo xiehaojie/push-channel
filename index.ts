@@ -37,7 +37,14 @@ function registerStreamingToolHooks(api: Pick<OpenClawPluginApi, "on">): void {
     if (!writer || !toolCallId) {
       return;
     }
-    writer({ type: "tool_result", toolCallId });
+    const message = event.message as
+      | { content?: unknown; isError?: boolean; details?: unknown }
+      | undefined;
+    const payload: Record<string, unknown> = { type: "tool_result", toolCallId };
+    if (message?.content !== undefined) payload.content = message.content;
+    if (message?.isError !== undefined) payload.isError = message.isError;
+    if (event.toolName) payload.toolName = event.toolName;
+    writer(payload);
   });
 }
 
