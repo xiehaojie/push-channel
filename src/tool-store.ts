@@ -8,7 +8,30 @@
 
 export type SseWriter = (event: Record<string, unknown>) => void;
 
-const writerStore = new Map<string, SseWriter>();
+type PushChannelToolStoreState = {
+  writerStore: Map<string, SseWriter>;
+  pendingStacks: Map<string, string[]>;
+};
+
+const PUSH_CHANNEL_TOOL_STORE_KEY = Symbol.for("openclaw.pushChannel.toolStore");
+
+function getToolStoreState(): PushChannelToolStoreState {
+  const globalStore = globalThis as Record<PropertyKey, unknown>;
+  const existing = globalStore[PUSH_CHANNEL_TOOL_STORE_KEY];
+  if (existing) {
+    return existing as PushChannelToolStoreState;
+  }
+  const created: PushChannelToolStoreState = {
+    writerStore: new Map<string, SseWriter>(),
+    pendingStacks: new Map<string, string[]>(),
+  };
+  globalStore[PUSH_CHANNEL_TOOL_STORE_KEY] = created;
+  return created;
+}
+
+const state = getToolStoreState();
+const writerStore = state.writerStore;
+const pendingStacks = state.pendingStacks;
 
 // --- SSE writer ---
 
@@ -27,8 +50,6 @@ export function clearWriter(sessionKey: string): void {
 
 // --- Pending toolCallId stack ---
 // before_tool_call pushes, tool_result_persist pops.
-
-const pendingStacks = new Map<string, string[]>();
 
 export function pushToolCallId(sessionKey: string, toolCallId: string): void {
   let stack = pendingStacks.get(sessionKey);

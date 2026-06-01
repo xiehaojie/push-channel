@@ -94,6 +94,11 @@ export const pushChannelPlugin = {
     }),
   },
   outbound: pushChannelOutbound,
+  messaging: {
+    targetResolver: {
+      looksLikeId: () => true,
+    },
+  },
   message: pushChannelMessageAdapter,
   gateway: {
     startAccount: async (ctx: ChannelGatewayContext<ResolvedPushChannelAccount>) => {

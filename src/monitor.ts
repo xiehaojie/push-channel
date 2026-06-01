@@ -323,7 +323,7 @@ async function ensureSessionTranscriptFile(
   if (!fs.existsSync(transcriptPath)) {
     log(`[PushChannel] Creating session transcript: ${path.basename(transcriptPath)}`);
     fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
-    const { CURRENT_SESSION_VERSION } = await import("@earendil-works/pi-coding-agent");
+    const { CURRENT_SESSION_VERSION } = await import("openclaw/plugin-sdk/agent-sessions");
     const header = {
       type: "session",
       version: CURRENT_SESSION_VERSION,
