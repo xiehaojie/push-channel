@@ -94,3 +94,31 @@ pnpm dev
 *   **Session ID**: 前端指定的 Session ID 将作为 OpenClaw 中的 `peerId`，用于区分不同的用户会话。
 *   **端口冲突**: 请确保端口 3000 (Plugin) 和 3001 (Middleware) 未被占用，或在配置中修改。
 *   **网络连通性**: 如果 OpenClaw 和 Middleware 运行在不同机器，请确保网络互通，并配置正确的 IP 地址。
+
+## Mention and Subagent Visibility
+
+`push-channel` supports structured agent mentions for one-session orchestration. The inbound webhook still sends the message to the main `agentId`; mentioned agents are strong constraints for that main agent to delegate and summarize back into the same `sessionId`.
+
+```json
+{
+  "agentId": "main",
+  "sessionId": "user-session-1",
+  "content": "Ask @researcher to investigate and @coder to draft the patch",
+  "mentions": [
+    { "agentId": "researcher", "label": "researcher" },
+    { "agentId": "coder", "label": "coder" }
+  ]
+}
+```
+
+The middleware WebSocket path forwards `mentions` unchanged to the webhook. The browser demo also parses simple `@agentId` tokens and sends them as structured mentions.
+
+Subagent progress can be visualized through SSE events from the webhook. `admin-backend` converts these events to WebSocket messages scoped to the original `sessionId`:
+
+```json
+{ "type": "subagent_start", "agentId": "researcher", "label": "researcher" }
+{ "type": "subagent_stream", "agentId": "researcher", "content": "Reading docs..." }
+{ "type": "subagent_result", "agentId": "researcher", "content": "Findings..." }
+{ "type": "subagent_error", "agentId": "coder", "message": "Failed to run" }
+{ "type": "subagent_end", "agentId": "researcher", "status": "success" }
+```

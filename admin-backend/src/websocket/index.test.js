@@ -227,6 +227,133 @@ test("message flow forwards ids and handles cumulative SSE snapshots", { timeout
   assert.equal(end.answerMessageId, "answer-1-1");
 });
 
+test("message flow forwards structured mentions to OpenClaw", { timeout: 3000 }, async (t) => {
+  let receivedPayload;
+  const upstream = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk.toString();
+    });
+    req.on("end", () => {
+      receivedPayload = JSON.parse(body);
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+      res.end();
+    });
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(async () => {
+    await closeServer(upstream);
+  });
+
+  process.env.OPENCLAW_WEBHOOK_URL = `http://127.0.0.1:${upstreamPort}/webhook`;
+
+  delete require.cache[require.resolve("./index")];
+  const server = http.createServer();
+  const { initWebSocket } = require("./index");
+  const connections = initWebSocket(server);
+  const port = await listen(server);
+  t.after(async () => {
+    closeConnections(connections);
+    await closeServer(server);
+  });
+
+  const socket = await createSocket(port);
+  const messages = collectMessages(socket);
+  t.after(() => socket.close());
+  socket.send(JSON.stringify({ type: "register", agentId: "main", sessionId: "session-mentions" }));
+  await messages.waitFor((data) => data.type === "registered", "registered");
+
+  socket.send(
+    JSON.stringify({
+      type: "message",
+      content: "Please ask @researcher and @coder",
+      sessionId: "session-mentions",
+      mentions: [
+        { agentId: "researcher", label: "researcher" },
+        { agentId: "coder", label: "coder" },
+      ],
+    }),
+  );
+
+  await waitFor(() => Boolean(receivedPayload), "upstream payload");
+  assert.deepEqual(receivedPayload.mentions, [
+    { agentId: "researcher", label: "researcher" },
+    { agentId: "coder", label: "coder" },
+  ]);
+});
+
+test("subagent SSE events are broadcast to the active session", { timeout: 3000 }, async (t) => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ type: "subagent_start", agentId: "researcher", label: "Researcher" })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "subagent_stream", agentId: "researcher", content: "reading docs" })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "subagent_result", agentId: "researcher", content: "found answer" })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "subagent_error", agentId: "coder", message: "missing workspace" })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "subagent_end", agentId: "researcher", status: "success" })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+      res.end();
+    });
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(async () => {
+    await closeServer(upstream);
+  });
+
+  process.env.OPENCLAW_WEBHOOK_URL = `http://127.0.0.1:${upstreamPort}/webhook`;
+
+  delete require.cache[require.resolve("./index")];
+  const server = http.createServer();
+  const { initWebSocket } = require("./index");
+  const connections = initWebSocket(server);
+  const port = await listen(server);
+  t.after(async () => {
+    closeConnections(connections);
+    await closeServer(server);
+  });
+
+  const socket = await createSocket(port);
+  const messages = collectMessages(socket);
+  t.after(() => socket.close());
+  socket.send(JSON.stringify({ type: "register", agentId: "main", sessionId: "session-subagents" }));
+  await messages.waitFor((data) => data.type === "registered", "registered");
+
+  socket.send(
+    JSON.stringify({
+      type: "message",
+      content: "Please ask @researcher",
+      sessionId: "session-subagents",
+      queryMessageId: "query-subagents",
+      answerMessageId: "answer-subagents",
+    }),
+  );
+
+  const start = await messages.waitFor((data) => data.type === "subagent_start", "subagent_start");
+  assert.equal(start.sessionId, "session-subagents");
+  assert.equal(start.queryMessageId, "query-subagents");
+  assert.equal(start.agentId, "researcher");
+  assert.equal(start.label, "Researcher");
+
+  const stream = await messages.waitFor((data) => data.type === "subagent_stream", "subagent_stream");
+  assert.equal(stream.agentId, "researcher");
+  assert.equal(stream.content, "reading docs");
+  assert.equal(stream.sessionId, "session-subagents");
+
+  const result = await messages.waitFor((data) => data.type === "subagent_result", "subagent_result");
+  assert.equal(result.agentId, "researcher");
+  assert.equal(result.content, "found answer");
+
+  const error = await messages.waitFor((data) => data.type === "subagent_error", "subagent_error");
+  assert.equal(error.agentId, "coder");
+  assert.equal(error.message, "missing workspace");
+
+  const end = await messages.waitFor((data) => data.type === "subagent_end", "subagent_end");
+  assert.equal(end.agentId, "researcher");
+  assert.equal(end.status, "success");
+});
+
 test("messages stay scoped to the active session for the same agent", { timeout: 3000 }, async (t) => {
   const upstream = http.createServer((req, res) => {
     req.resume();

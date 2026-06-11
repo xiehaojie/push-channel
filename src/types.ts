@@ -5,6 +5,11 @@ export type PushChannelConfig = {
   listenPath: string;
 };
 
+export type PushChannelMention = {
+  agentId: string;
+  label?: string;
+};
+
 export type ResolvedPushChannelAccount = {
   accountId: string;
   enabled: boolean;

@@ -8,6 +8,25 @@ function nextAnswerMessageId(agentId, sessionId) {
     return `push-${key}-${next}`;
 }
 
+function resolveDeliveryAgentId(agentId, sessionId) {
+    if (connections.has(agentId)) {
+        return agentId;
+    }
+    if (!sessionId) {
+        return agentId;
+    }
+
+    for (const [candidateAgentId, sockets] of connections.entries()) {
+        for (const socket of sockets) {
+            if (socket.sessionIds?.has(sessionId)) {
+                return candidateAgentId;
+            }
+        }
+    }
+
+    return agentId;
+}
+
 class PushController {
     async send(ctx) {
         const body = ctx.request.body;
@@ -23,14 +42,21 @@ class PushController {
             return;
         }
 
-        const sockets = connections.get(agentId);
+        const deliveryAgentId = resolveDeliveryAgentId(agentId, sessionId);
+        if (deliveryAgentId !== agentId) {
+            console.log(
+                `Resolved push request agent ${agentId} to active session owner ${deliveryAgentId} for session ${sessionId}`,
+            );
+        }
+
+        const sockets = connections.get(deliveryAgentId);
         if (sockets && sockets.size > 0) {
             const chunkSize = 5;
             const delay = 50;
-            const answerMessageId = nextAnswerMessageId(agentId, sessionId || agentId);
+            const answerMessageId = nextAnswerMessageId(deliveryAgentId, sessionId || deliveryAgentId);
 
             const streamLoop = async () => {
-                broadcastToSession(agentId, sessionId, {
+                broadcastToSession(deliveryAgentId, sessionId, {
                     type: "stream_start",
                     from: 'Assistant',
                     sessionId,
@@ -40,7 +66,7 @@ class PushController {
                 let currentIndex = 0;
                 while (currentIndex < content.length) {
                     const chunk = content.slice(currentIndex, currentIndex + chunkSize);
-                    broadcastToSession(agentId, sessionId, {
+                    broadcastToSession(deliveryAgentId, sessionId, {
                         type: "stream",
                         content: chunk,
                         role: 'assistant',
@@ -50,7 +76,7 @@ class PushController {
                     currentIndex += chunkSize;
                     await new Promise(r => setTimeout(r, delay));
                 }
-                broadcastToSession(agentId, sessionId, {
+                broadcastToSession(deliveryAgentId, sessionId, {
                     type: "stream_end",
                     sessionId,
                     answerMessageId
@@ -62,7 +88,7 @@ class PushController {
             ctx.status = 200;
             ctx.body = "Sent";
         } else {
-            console.log(`Agent ${agentId} not found`);
+            console.log(`Agent ${agentId} not found for session ${sessionId || '<none>'}`);
             ctx.status = 404;
             ctx.body = "Agent not found";
         }

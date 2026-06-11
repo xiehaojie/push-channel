@@ -62,3 +62,35 @@ test("send assigns a distinct answer id to each outbound stream", async (t) => {
   );
   assert.deepEqual(streamIds, new Set(starts.map((message) => message.answerMessageId)));
 });
+
+test("send falls back to the socket subscribed to the session id", async (t) => {
+  const messages = [];
+  connections.set("main", new Set([createOpenSocket(messages)]));
+  t.after(() => {
+    connections.delete("main");
+  });
+
+  const ctx = {
+    request: {
+      body: {
+        agentId: "session-1",
+        sessionId: "session-1",
+        content: "async result",
+      },
+    },
+  };
+
+  await pushController.send(ctx);
+
+  assert.equal(ctx.status, 200);
+  assert.equal(ctx.body, "Sent");
+
+  await waitFor(
+    () => messages.some((message) => message.type === "stream_end"),
+    "fallback stream completion",
+  );
+
+  assert.equal(messages[0].type, "stream_start");
+  assert.equal(messages[0].sessionId, "session-1");
+  assert.ok(messages[0].answerMessageId.startsWith("push-main:session-1-"));
+});

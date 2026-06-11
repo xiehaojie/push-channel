@@ -144,6 +144,78 @@
             appendMessage('System', text, 'system');
         }
 
+        function extractMentions(text) {
+            const seen = new Set();
+            const mentions = [];
+            const pattern = /(^|\s)@([A-Za-z0-9_.:-]+)/g;
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                const agentId = match[2];
+                if (seen.has(agentId)) continue;
+                seen.add(agentId);
+                mentions.push({ agentId, label: agentId });
+            }
+            return mentions;
+        }
+
+        function subagentSelector(data) {
+            const agentId = data.agentId || data.label || 'unknown';
+            const sessionId = data.sessionId || sessionIdInput.value.trim();
+            return `.subagent-card[data-subagent-id="${CSS.escape(agentId)}"][data-session-id="${CSS.escape(sessionId)}"]`;
+        }
+
+        function ensureSubagentCard(data) {
+            let card = messagesDiv.querySelector(subagentSelector(data));
+            if (card) return card;
+
+            const agentId = data.agentId || data.label || 'unknown';
+            card = document.createElement('div');
+            card.className = 'message system subagent-card';
+            card.dataset.subagentId = agentId;
+            if (data.sessionId) card.dataset.sessionId = data.sessionId;
+
+            const header = document.createElement('div');
+            header.className = 'subagent-header';
+
+            const name = document.createElement('strong');
+            name.textContent = `@${data.label || agentId}`;
+
+            const status = document.createElement('span');
+            status.className = 'subagent-status';
+            status.textContent = 'Queued';
+
+            header.append(name, status);
+
+            const progress = document.createElement('pre');
+            progress.className = 'subagent-progress';
+
+            const result = document.createElement('pre');
+            result.className = 'subagent-result';
+            result.hidden = true;
+
+            card.append(header, progress, result);
+            messagesDiv.appendChild(card);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            return card;
+        }
+
+        function updateSubagentStatus(card, statusText, stateClass) {
+            card.classList.remove('subagent-running', 'subagent-done', 'subagent-error');
+            if (stateClass) card.classList.add(stateClass);
+            const status = card.querySelector('.subagent-status');
+            if (status) status.textContent = statusText;
+        }
+
+        function appendSubagentProgress(data, text) {
+            const card = ensureSubagentCard(data);
+            const progress = card.querySelector('.subagent-progress');
+            if (progress && text) {
+                progress.textContent += `${progress.textContent ? '\n' : ''}${text}`;
+            }
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            return card;
+        }
+
         function streamSelector(data) {
             if (data.answerMessageId) {
                 return `.stream-active[data-answer-message-id="${CSS.escape(data.answerMessageId)}"] .content`;
@@ -254,6 +326,43 @@
                 appendSystemMessage('Tools finished.');
             });
 
+            sdk.onSubagentStart((data) => {
+                if (!isCurrentSession(data)) return;
+                const card = ensureSubagentCard(data);
+                updateSubagentStatus(card, 'Running', 'subagent-running');
+            });
+
+            sdk.onSubagentStream((data) => {
+                if (!isCurrentSession(data)) return;
+                const card = appendSubagentProgress(data, data.content || '');
+                updateSubagentStatus(card, 'Running', 'subagent-running');
+            });
+
+            sdk.onSubagentResult((data) => {
+                if (!isCurrentSession(data)) return;
+                const card = ensureSubagentCard(data);
+                const result = card.querySelector('.subagent-result');
+                if (result) {
+                    result.hidden = false;
+                    result.textContent = data.content || '';
+                }
+                updateSubagentStatus(card, 'Done', 'subagent-done');
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            });
+
+            sdk.onSubagentError((data) => {
+                if (!isCurrentSession(data)) return;
+                const card = appendSubagentProgress(data, data.message || 'Subagent failed');
+                updateSubagentStatus(card, 'Failed', 'subagent-error');
+            });
+
+            sdk.onSubagentEnd((data) => {
+                if (!isCurrentSession(data)) return;
+                const card = ensureSubagentCard(data);
+                const failed = data.status === 'error' || data.status === 'failed';
+                updateSubagentStatus(card, failed ? 'Failed' : 'Done', failed ? 'subagent-error' : 'subagent-done');
+            });
+
             sdk.onTimeoutDeferred((data) => {
                 appendSystemMessage(data.message || 'Tools are still running. Waiting for follow-up.');
             });
@@ -299,9 +408,11 @@
             const answerMessageId = `answer-${Date.now()}`;
             localQueryIds.add(queryMessageId);
             appendMessage('You', text, 'you', { queryMessageId, sessionId });
+            const mentions = extractMentions(text);
             sdk.sendMessage(text, sessionId, {
                 queryMessageId,
                 answerMessageId,
+                ...(mentions.length > 0 ? { mentions } : {}),
             });
             messageInput.value = '';
         });

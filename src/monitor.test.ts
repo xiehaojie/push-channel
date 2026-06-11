@@ -126,4 +126,91 @@ describe("push-channel monitor", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("injects required mentioned agents into the main agent body", async () => {
+    const port = await allocatePort();
+    const abortController = new AbortController();
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "push-channel-mentions-test-"));
+    const storePath = path.join(tmpDir, "sessions.json");
+    let finalizedContext: Record<string, unknown> | null = null;
+    const dispatchReplyFromConfig = vi.fn(async () => ({ text: "ok" }));
+    setPushChannelRuntime({
+      channel: {
+        session: {
+          resolveStorePath: vi.fn(() => storePath),
+          recordSessionMetaFromInbound: vi.fn(async () => ({
+            sessionId: "mention-session",
+            updatedAt: Date.now(),
+          })),
+          recordInboundSession: vi.fn(async () => {}),
+        },
+        reply: {
+          finalizeInboundContext: vi.fn((ctx) => {
+            finalizedContext = ctx as Record<string, unknown>;
+            return ctx;
+          }),
+          withReplyDispatcher: vi.fn(async (params: { run: () => Promise<unknown> }) => {
+            return await params.run();
+          }),
+          dispatchReplyFromConfig,
+        },
+      },
+      agent: {
+        session: {
+          resolveStorePath: vi.fn(() => storePath),
+          resolveSessionFilePath: vi.fn(
+            (sid: string) => path.join(tmpDir, `${sid}.jsonl`),
+          ),
+        },
+      },
+    } as unknown as PluginRuntime);
+
+    const monitor = monitorPushChannel({
+      config: {
+        channels: {
+          "push-channel": {
+            enabled: true,
+            middlewareUrl: "http://127.0.0.1:1",
+            listenPort: port,
+            listenPath: "/webhook",
+          },
+        },
+      } as never,
+      runtime: { log: vi.fn() } as never,
+      accountId: "default",
+      abortSignal: abortController.signal,
+    });
+    try {
+      await waitForServer(`http://127.0.0.1:${port}/health`);
+
+      const response = await fetch(`http://127.0.0.1:${port}/webhook`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          agentId: "main",
+          sessionId: "demo-session",
+          content: "please coordinate this",
+          mentions: [
+            { agentId: "researcher", label: "Researcher" },
+            { agentId: "coder", label: "Coder" },
+          ],
+        }),
+      });
+      await response.text();
+
+      expect(dispatchReplyFromConfig).toHaveBeenCalledTimes(1);
+      expect(finalizedContext).not.toBeNull();
+      const bodyForAgent = String(finalizedContext?.["BodyForAgent"] ?? "");
+      expect(bodyForAgent).toContain("Required mentioned agents");
+      expect(bodyForAgent).toContain("@researcher");
+      expect(bodyForAgent).toContain("@coder");
+      expect(bodyForAgent).toContain("must delegate");
+      expect(finalizedContext?.["OriginatingTo"]).toBe("demo-session");
+    } finally {
+      abortController.abort();
+      await monitor;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
 });

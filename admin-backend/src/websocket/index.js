@@ -23,6 +23,21 @@ function trimToNull(value) {
   return trimmed ? trimmed : null;
 }
 
+function normalizeMentions(value) {
+  if (!Array.isArray(value)) return undefined;
+  const mentions = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const agentId = trimToNull(item.agentId);
+    if (!agentId) continue;
+    const mention = { agentId };
+    const label = trimToNull(item.label);
+    if (label) mention.label = label;
+    mentions.push(mention);
+  }
+  return mentions.length > 0 ? mentions : undefined;
+}
+
 function socketIsOpen(socket) {
   return socket.readyState === socket.OPEN;
 }
@@ -270,6 +285,25 @@ function processSSEEvent(agentId, line, sessionId, queryMessageId, baseAnswerMes
     };
     if (context.sessionId) payload.sessionId = context.sessionId;
     messages.push(appendMessageIds(payload, context));
+  } else if (
+    event.type === "subagent_start" ||
+    event.type === "subagent_stream" ||
+    event.type === "subagent_result" ||
+    event.type === "subagent_error" ||
+    event.type === "subagent_end"
+  ) {
+    closeStartedStream(context, messages);
+    const payload = { type: event.type };
+    const subagentId = trimToNull(event.agentId);
+    if (subagentId) payload.agentId = subagentId;
+    const label = trimToNull(event.label);
+    if (label) payload.label = label;
+    if (typeof event.content === "string") payload.content = event.content;
+    if (typeof event.message === "string") payload.message = event.message;
+    const status = trimToNull(event.status);
+    if (status) payload.status = status;
+    if (context.sessionId) payload.sessionId = context.sessionId;
+    messages.push(appendMessageIds(payload, context));
   } else if (event.type === "done") {
     closeStartedStream(context, messages);
     context.streamEnded = true;
@@ -349,6 +383,8 @@ async function forwardMessage(socket, data) {
   const abortController = new AbortController();
   activeStreams.set(requestKey, abortController);
   const payload = { agentId, sessionId, content };
+  const mentions = normalizeMentions(data.mentions);
+  if (mentions) payload.mentions = mentions;
 
   try {
     console.log("WebSocket: Forwarding to OpenClaw with payload:", payload);

@@ -12,13 +12,15 @@ import {
   createStreamingReplyDispatcher,
 } from "./reply-dispatcher.js";
 import { getPushChannelRuntime } from "./runtime.js";
-import type { ResolvedPushChannelAccount } from "./types.js";
+import { rememberPushChannelSessionRoute } from "./session-routes.js";
+import type { PushChannelMention, ResolvedPushChannelAccount } from "./types.js";
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 
 type IncomingPushPayload = {
   agentId: string;
   sessionId: string;
   content: string;
+  mentions?: PushChannelMention[];
 };
 
 /** Per-session dispatch mutex to prevent concurrent embedded agent runs on the same session. */
@@ -93,7 +95,49 @@ function parseIncomingPayload(value: unknown): IncomingPushPayload | null {
   if (!agentId || !sessionId || !content) {
     return null;
   }
-  return { agentId, sessionId, content };
+  return { agentId, sessionId, content, mentions: parseMentions(record.mentions) };
+}
+
+function parseMentions(value: unknown): PushChannelMention[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const mentions: PushChannelMention[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    const agentId = typeof record.agentId === "string" ? record.agentId.trim() : "";
+    if (!agentId || seen.has(agentId)) {
+      continue;
+    }
+    seen.add(agentId);
+    const label = typeof record.label === "string" ? record.label.trim() : "";
+    mentions.push(label ? { agentId, label } : { agentId });
+  }
+  return mentions.length > 0 ? mentions : undefined;
+}
+
+function buildAgentFacingContent(payload: IncomingPushPayload): string {
+  const mentions = payload.mentions ?? [];
+  if (mentions.length === 0) {
+    return payload.content;
+  }
+  const targets = mentions
+    .map((mention) =>
+      mention.label && mention.label !== mention.agentId
+        ? `@${mention.agentId} (${mention.label})`
+        : `@${mention.agentId}`,
+    )
+    .join(", ");
+  return (
+    `${payload.content}\n\n` +
+    `[System: Required mentioned agents: ${targets}. ` +
+    `The user explicitly mentioned these agents as strong constraints. ` +
+    `You must delegate work to every listed agent and return their progress and final results to this same push-channel session.]`
+  );
 }
 
 function closeServer(server: http.Server): Promise<void> {
@@ -363,6 +407,7 @@ async function handleIncomingMessage(
   const peerKind = "direct";
   const peerId = payload.sessionId;
   const sessionKey = `agent:${payload.agentId}:channel:${channelId}:${peerKind}:${peerId}`;
+  rememberPushChannelSessionRoute({ sessionId: payload.sessionId, agentId: payload.agentId });
   const streaming = res ? createStreamingReplyDispatcher(res, sessionKey) : null;
   if (!streaming && !account.config.middlewareUrl) {
     throw new Error("[PushChannel] middlewareUrl not configured");
@@ -375,14 +420,15 @@ async function handleIncomingMessage(
         sessionId: payload.sessionId,
       });
 
+  const agentFacingContent = buildAgentFacingContent(payload);
   const ctxPayload = replyModule.finalizeInboundContext({
     Body: payload.content,
-    BodyForAgent: payload.content,
+    BodyForAgent: agentFacingContent,
     InboundHistory: undefined,
     ReplyToId: undefined,
     RootMessageId: undefined,
     RawBody: payload.content,
-    CommandBody: payload.content,
+    CommandBody: agentFacingContent,
     From: payload.sessionId,
     To: payload.agentId,
     SessionKey: sessionKey,
@@ -400,7 +446,7 @@ async function handleIncomingMessage(
     WasMentioned: true,
     CommandAuthorized: true,
     OriginatingChannel: channelId,
-    OriginatingTo: payload.agentId,
+    OriginatingTo: payload.sessionId,
     MessageThreadId: peerId,
   });
 

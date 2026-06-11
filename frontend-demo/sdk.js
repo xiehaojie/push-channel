@@ -16,6 +16,11 @@ class PushChannelSDK {
       toolEnd: null,
       toolCall: null,
       toolResult: null,
+      subagentStart: null,
+      subagentStream: null,
+      subagentResult: null,
+      subagentError: null,
+      subagentEnd: null,
       timeoutDeferred: null,
       error: null,
       close: null,
@@ -72,6 +77,16 @@ class PushChannelSDK {
           this.callbacks.toolStart(data);
         } else if (data.type === "tool_end" && this.callbacks.toolEnd) {
           this.callbacks.toolEnd(data);
+        } else if (data.type === "subagent_start" && this.callbacks.subagentStart) {
+          this.callbacks.subagentStart(data);
+        } else if (data.type === "subagent_stream" && this.callbacks.subagentStream) {
+          this.callbacks.subagentStream(data);
+        } else if (data.type === "subagent_result" && this.callbacks.subagentResult) {
+          this.callbacks.subagentResult(data);
+        } else if (data.type === "subagent_error" && this.callbacks.subagentError) {
+          this.callbacks.subagentError(data);
+        } else if (data.type === "subagent_end" && this.callbacks.subagentEnd) {
+          this.callbacks.subagentEnd(data);
         } else if (data.type === "timeout_deferred" && this.callbacks.timeoutDeferred) {
           this.callbacks.timeoutDeferred(data);
         } else if (data.type === "message" && this.callbacks.message) {
@@ -161,6 +176,26 @@ class PushChannelSDK {
 
   onToolResult(callback) {
     this.callbacks.toolResult = callback;
+  }
+
+  onSubagentStart(callback) {
+    this.callbacks.subagentStart = callback;
+  }
+
+  onSubagentStream(callback) {
+    this.callbacks.subagentStream = callback;
+  }
+
+  onSubagentResult(callback) {
+    this.callbacks.subagentResult = callback;
+  }
+
+  onSubagentError(callback) {
+    this.callbacks.subagentError = callback;
+  }
+
+  onSubagentEnd(callback) {
+    this.callbacks.subagentEnd = callback;
   }
 
   onTimeoutDeferred(callback) {
