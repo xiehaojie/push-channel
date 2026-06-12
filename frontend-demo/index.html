@@ -54,6 +54,7 @@
     </div>
 
     <script src="sdk.js"></script>
+    <script src="mentions.js"></script>
     <script>
         let sdk = null;
         let isToolRunning = false;
@@ -142,20 +143,6 @@
 
         function appendSystemMessage(text) {
             appendMessage('System', text, 'system');
-        }
-
-        function extractMentions(text) {
-            const seen = new Set();
-            const mentions = [];
-            const pattern = /(^|\s)@([A-Za-z0-9_.:-]+)/g;
-            let match;
-            while ((match = pattern.exec(text)) !== null) {
-                const agentId = match[2];
-                if (seen.has(agentId)) continue;
-                seen.add(agentId);
-                mentions.push({ agentId, label: agentId });
-            }
-            return mentions;
         }
 
         function subagentSelector(data) {

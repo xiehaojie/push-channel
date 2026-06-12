@@ -421,6 +421,7 @@ async function handleIncomingMessage(
       });
 
   const agentFacingContent = buildAgentFacingContent(payload);
+  const wasMentioned = (payload.mentions?.length ?? 0) > 0;
   const ctxPayload = replyModule.finalizeInboundContext({
     Body: payload.content,
     BodyForAgent: agentFacingContent,
@@ -443,7 +444,7 @@ async function handleIncomingMessage(
     MessageSid: Date.now().toString(),
     ReplyToBody: undefined,
     Timestamp: Date.now(),
-    WasMentioned: true,
+    WasMentioned: wasMentioned,
     CommandAuthorized: true,
     OriginatingChannel: channelId,
     OriginatingTo: payload.sessionId,
