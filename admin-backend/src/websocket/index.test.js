@@ -111,6 +111,79 @@ function closeServer(server) {
   return new Promise((resolve) => server.close(resolve));
 }
 
+test("processSSEEvent preserves child session details on subagent events", () => {
+  delete require.cache[require.resolve("./index")];
+  const { processSSEEvent } = require("./index");
+
+  const childSessionKey = "agent:researcher:subagent:child";
+  const callResult = processSSEEvent(
+    "main",
+    `data: ${JSON.stringify({
+      type: "subagent_tool_call",
+      agentId: "researcher",
+      label: "Researcher",
+      childSessionKey,
+      toolCallId: "tool-1",
+      toolName: "sessions_yield",
+      args: { reason: "need context" },
+    })}`,
+    "session-subagents",
+    "query-subagents",
+    "answer-subagents",
+  );
+
+  assert.equal(callResult.messages.length, 1);
+  assert.equal(callResult.messages[0].type, "subagent_tool_call");
+  assert.equal(callResult.messages[0].agentId, "researcher");
+  assert.equal(callResult.messages[0].label, "Researcher");
+  assert.equal(callResult.messages[0].childSessionKey, childSessionKey);
+  assert.equal(callResult.messages[0].toolCallId, "tool-1");
+  assert.equal(callResult.messages[0].toolName, "sessions_yield");
+  assert.deepEqual(callResult.messages[0].args, { reason: "need context" });
+  assert.equal(callResult.messages[0].sessionId, "session-subagents");
+  assert.equal(callResult.messages[0].queryMessageId, "query-subagents");
+
+  const result = processSSEEvent(
+    "main",
+    `data: ${JSON.stringify({
+      type: "subagent_tool_result",
+      agentId: "researcher",
+      childSessionKey,
+      toolCallId: "tool-1",
+      toolName: "sessions_yield",
+      content: [{ text: "yielded" }],
+      isError: false,
+    })}`,
+    "session-subagents",
+    "query-subagents",
+    "answer-subagents",
+  );
+
+  assert.equal(result.messages.length, 1);
+  assert.equal(result.messages[0].type, "subagent_tool_result");
+  assert.deepEqual(result.messages[0].content, [{ text: "yielded" }]);
+  assert.equal(result.messages[0].isError, false);
+
+  const message = processSSEEvent(
+    "main",
+    `data: ${JSON.stringify({
+      type: "subagent_message",
+      agentId: "researcher",
+      childSessionKey,
+      messageId: "assistant-1",
+      content: "我先查询天气。",
+    })}`,
+    "session-subagents",
+    "query-subagents",
+    "answer-subagents",
+  );
+
+  assert.equal(message.messages.length, 1);
+  assert.equal(message.messages[0].type, "subagent_message");
+  assert.equal(message.messages[0].messageId, "assistant-1");
+  assert.equal(message.messages[0].content, "我先查询天气。");
+});
+
 function createSocket(port) {
   const socket = new WebSocket(`ws://127.0.0.1:${port}`);
   return new Promise((resolve, reject) => {
@@ -288,11 +361,34 @@ test("subagent SSE events are broadcast to the active session", { timeout: 3000 
     req.resume();
     req.on("end", () => {
       res.writeHead(200, { "Content-Type": "text/event-stream" });
-      res.write(`data: ${JSON.stringify({ type: "subagent_start", agentId: "researcher", label: "Researcher" })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: "subagent_stream", agentId: "researcher", content: "reading docs" })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({
+          type: "subagent_start",
+          agentId: "researcher",
+          label: "Researcher",
+          childSessionKey: "agent:researcher:subagent:child",
+        })}\n\n`,
+      );
+      res.write(
+        `data: ${JSON.stringify({
+          type: "subagent_tool_call",
+          agentId: "researcher",
+          childSessionKey: "agent:researcher:subagent:child",
+          toolCallId: "tool-1",
+          toolName: "sessions_yield",
+          args: { reason: "reading docs" },
+        })}\n\n`,
+      );
       res.write(`data: ${JSON.stringify({ type: "subagent_result", agentId: "researcher", content: "found answer" })}\n\n`);
       res.write(`data: ${JSON.stringify({ type: "subagent_error", agentId: "coder", message: "missing workspace" })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: "subagent_end", agentId: "researcher", status: "success" })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({
+          type: "subagent_end",
+          agentId: "researcher",
+          childSessionKey: "agent:researcher:subagent:child",
+          status: "success",
+        })}\n\n`,
+      );
       res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
       res.end();
     });
@@ -335,11 +431,15 @@ test("subagent SSE events are broadcast to the active session", { timeout: 3000 
   assert.equal(start.queryMessageId, "query-subagents");
   assert.equal(start.agentId, "researcher");
   assert.equal(start.label, "Researcher");
+  assert.equal(start.childSessionKey, "agent:researcher:subagent:child");
 
-  const stream = await messages.waitFor((data) => data.type === "subagent_stream", "subagent_stream");
+  const stream = await messages.waitFor((data) => data.type === "subagent_tool_call", "subagent_tool_call");
   assert.equal(stream.agentId, "researcher");
-  assert.equal(stream.content, "reading docs");
+  assert.deepEqual(stream.args, { reason: "reading docs" });
   assert.equal(stream.sessionId, "session-subagents");
+  assert.equal(stream.childSessionKey, "agent:researcher:subagent:child");
+  assert.equal(stream.toolCallId, "tool-1");
+  assert.equal(stream.toolName, "sessions_yield");
 
   const result = await messages.waitFor((data) => data.type === "subagent_result", "subagent_result");
   assert.equal(result.agentId, "researcher");
@@ -352,6 +452,7 @@ test("subagent SSE events are broadcast to the active session", { timeout: 3000 
   const end = await messages.waitFor((data) => data.type === "subagent_end", "subagent_end");
   assert.equal(end.agentId, "researcher");
   assert.equal(end.status, "success");
+  assert.equal(end.childSessionKey, "agent:researcher:subagent:child");
 });
 
 test("messages stay scoped to the active session for the same agent", { timeout: 3000 }, async (t) => {

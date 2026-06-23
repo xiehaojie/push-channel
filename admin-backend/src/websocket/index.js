@@ -287,7 +287,10 @@ function processSSEEvent(agentId, line, sessionId, queryMessageId, baseAnswerMes
     messages.push(appendMessageIds(payload, context));
   } else if (
     event.type === "subagent_start" ||
+    event.type === "subagent_message" ||
     event.type === "subagent_stream" ||
+    event.type === "subagent_tool_call" ||
+    event.type === "subagent_tool_result" ||
     event.type === "subagent_result" ||
     event.type === "subagent_error" ||
     event.type === "subagent_end"
@@ -298,7 +301,19 @@ function processSSEEvent(agentId, line, sessionId, queryMessageId, baseAnswerMes
     if (subagentId) payload.agentId = subagentId;
     const label = trimToNull(event.label);
     if (label) payload.label = label;
-    if (typeof event.content === "string") payload.content = event.content;
+    const childSessionKey = trimToNull(event.childSessionKey);
+    if (childSessionKey) payload.childSessionKey = childSessionKey;
+    const messageId = trimToNull(event.messageId);
+    if (messageId) payload.messageId = messageId;
+    const toolCallId = trimToNull(event.toolCallId);
+    if (toolCallId) payload.toolCallId = toolCallId;
+    const toolName = trimToNull(event.toolName);
+    if (toolName) payload.toolName = toolName;
+    if (event.args && typeof event.args === "object" && !Array.isArray(event.args)) {
+      payload.args = event.args;
+    }
+    if (event.content !== undefined) payload.content = event.content;
+    if (event.isError !== undefined) payload.isError = Boolean(event.isError);
     if (typeof event.message === "string") payload.message = event.message;
     const status = trimToNull(event.status);
     if (status) payload.status = status;
@@ -546,4 +561,5 @@ module.exports = {
   markToolRunning,
   broadcast,
   broadcastToSession,
+  processSSEEvent,
 };

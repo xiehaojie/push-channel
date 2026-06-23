@@ -408,7 +408,13 @@ async function handleIncomingMessage(
   const peerId = payload.sessionId;
   const sessionKey = `agent:${payload.agentId}:channel:${channelId}:${peerKind}:${peerId}`;
   rememberPushChannelSessionRoute({ sessionId: payload.sessionId, agentId: payload.agentId });
-  const streaming = res ? createStreamingReplyDispatcher(res, sessionKey) : null;
+  const streaming = res
+    ? createStreamingReplyDispatcher(res, sessionKey, {
+        middlewareUrl: account.config.middlewareUrl,
+        agentId: payload.agentId,
+        sessionId: payload.sessionId,
+      })
+    : null;
   if (!streaming && !account.config.middlewareUrl) {
     throw new Error("[PushChannel] middlewareUrl not configured");
   }

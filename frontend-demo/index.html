@@ -146,7 +146,7 @@
         }
 
         function subagentSelector(data) {
-            const agentId = data.agentId || data.label || 'unknown';
+            const agentId = data.childSessionKey || data.agentId || data.label || 'unknown';
             const sessionId = data.sessionId || sessionIdInput.value.trim();
             return `.subagent-card[data-subagent-id="${CSS.escape(agentId)}"][data-session-id="${CSS.escape(sessionId)}"]`;
         }
@@ -155,7 +155,7 @@
             let card = messagesDiv.querySelector(subagentSelector(data));
             if (card) return card;
 
-            const agentId = data.agentId || data.label || 'unknown';
+            const agentId = data.childSessionKey || data.agentId || data.label || 'unknown';
             card = document.createElement('div');
             card.className = 'message system subagent-card';
             card.dataset.subagentId = agentId;
@@ -176,11 +176,14 @@
             const progress = document.createElement('pre');
             progress.className = 'subagent-progress';
 
+            const tools = document.createElement('div');
+            tools.className = 'subagent-tools';
+
             const result = document.createElement('pre');
             result.className = 'subagent-result';
             result.hidden = true;
 
-            card.append(header, progress, result);
+            card.append(header, progress, tools, result);
             messagesDiv.appendChild(card);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
             return card;
@@ -201,6 +204,54 @@
             }
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
             return card;
+        }
+
+        function subagentToolSelector(data) {
+            return `.subagent-tool-call[data-tool-call-id="${CSS.escape(data.toolCallId || '')}"]`;
+        }
+
+        function ensureSubagentToolCall(data) {
+            const card = ensureSubagentCard(data);
+            const tools = card.querySelector('.subagent-tools');
+            const id = data.toolCallId || `${data.toolName || 'tool'}-${Date.now()}`;
+            let tool = tools ? tools.querySelector(subagentToolSelector({ ...data, toolCallId: id })) : null;
+            if (tool) return tool;
+
+            tool = document.createElement('div');
+            tool.className = 'subagent-tool-call';
+            tool.dataset.toolCallId = id;
+
+            const title = document.createElement('div');
+            title.className = 'subagent-tool-title';
+            title.textContent = data.toolName || 'tool_call';
+
+            const args = document.createElement('pre');
+            args.className = 'subagent-tool-args';
+            args.textContent = data.args && Object.keys(data.args).length > 0
+                ? JSON.stringify(data.args, null, 2)
+                : '(no args)';
+
+            tool.append(title, args);
+            if (tools) tools.appendChild(tool);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            return tool;
+        }
+
+        function appendSubagentToolResult(data) {
+            const tool = ensureSubagentToolCall(data);
+            tool.classList.add('tool-done');
+            if (data.isError) tool.classList.add('tool-error');
+            const existing = tool.querySelector('.subagent-tool-result');
+            if (existing) existing.remove();
+            const resultText = extractToolResultText(data.content);
+            if (resultText !== null) {
+                const result = document.createElement('pre');
+                result.className = 'subagent-tool-result';
+                result.textContent = resultText;
+                tool.appendChild(result);
+            }
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            return tool;
         }
 
         function streamSelector(data) {
@@ -323,6 +374,26 @@
                 if (!isCurrentSession(data)) return;
                 const card = appendSubagentProgress(data, data.content || '');
                 updateSubagentStatus(card, 'Running', 'subagent-running');
+            });
+
+            sdk.onSubagentMessage((data) => {
+                if (!isCurrentSession(data)) return;
+                const card = appendSubagentProgress(data, data.content || '');
+                updateSubagentStatus(card, 'Running', 'subagent-running');
+            });
+
+            sdk.onSubagentToolCall((data) => {
+                if (!isCurrentSession(data)) return;
+                const card = ensureSubagentCard(data);
+                ensureSubagentToolCall(data);
+                updateSubagentStatus(card, 'Running', 'subagent-running');
+            });
+
+            sdk.onSubagentToolResult((data) => {
+                if (!isCurrentSession(data)) return;
+                const card = ensureSubagentCard(data);
+                appendSubagentToolResult(data);
+                updateSubagentStatus(card, data.isError ? 'Failed' : 'Running', data.isError ? 'subagent-error' : 'subagent-running');
             });
 
             sdk.onSubagentResult((data) => {

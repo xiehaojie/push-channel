@@ -17,7 +17,10 @@ class PushChannelSDK {
       toolCall: null,
       toolResult: null,
       subagentStart: null,
+      subagentMessage: null,
       subagentStream: null,
+      subagentToolCall: null,
+      subagentToolResult: null,
       subagentResult: null,
       subagentError: null,
       subagentEnd: null,
@@ -79,8 +82,14 @@ class PushChannelSDK {
           this.callbacks.toolEnd(data);
         } else if (data.type === "subagent_start" && this.callbacks.subagentStart) {
           this.callbacks.subagentStart(data);
+        } else if (data.type === "subagent_message" && this.callbacks.subagentMessage) {
+          this.callbacks.subagentMessage(data);
         } else if (data.type === "subagent_stream" && this.callbacks.subagentStream) {
           this.callbacks.subagentStream(data);
+        } else if (data.type === "subagent_tool_call" && this.callbacks.subagentToolCall) {
+          this.callbacks.subagentToolCall(data);
+        } else if (data.type === "subagent_tool_result" && this.callbacks.subagentToolResult) {
+          this.callbacks.subagentToolResult(data);
         } else if (data.type === "subagent_result" && this.callbacks.subagentResult) {
           this.callbacks.subagentResult(data);
         } else if (data.type === "subagent_error" && this.callbacks.subagentError) {
@@ -182,8 +191,20 @@ class PushChannelSDK {
     this.callbacks.subagentStart = callback;
   }
 
+  onSubagentMessage(callback) {
+    this.callbacks.subagentMessage = callback;
+  }
+
   onSubagentStream(callback) {
     this.callbacks.subagentStream = callback;
+  }
+
+  onSubagentToolCall(callback) {
+    this.callbacks.subagentToolCall = callback;
+  }
+
+  onSubagentToolResult(callback) {
+    this.callbacks.subagentToolResult = callback;
   }
 
   onSubagentResult(callback) {

@@ -3,14 +3,119 @@ import {
   defineBundledChannelEntry,
   type OpenClawPluginApi,
 } from "openclaw/plugin-sdk/channel-entry-contract";
-import { getWriter, pushToolCallId, popToolCallId } from "./src/tool-store.js";
+import {
+  bindChildSessionToParent,
+  clearChildSessionBinding,
+  getParentSessionKeyForChild,
+  getPushSessionTargetForSessionOrChild,
+  getWriter,
+  getWriterForSessionOrChild,
+  pushToolCallId,
+  popToolCallId,
+} from "./src/tool-store.js";
+import { sendPushEvent } from "./src/send.js";
+import { getPushChannelRuntime } from "./src/runtime.js";
+import { createSubagentEventsFromMessages } from "./src/subagent-transcript-events.js";
 
 type SubagentDisplayInfo = {
   agentId: string;
   label: string;
 };
 
+type StreamingToolHookApi = Pick<OpenClawPluginApi, "on"> &
+  Partial<Pick<OpenClawPluginApi, "runtime" | "lifecycle">>;
+
 const subagentDisplayByChildSessionKey = new Map<string, SubagentDisplayInfo>();
+const deliveredSubagentEventKeys = new Set<string>();
+
+function subagentEventKey(payload: Record<string, unknown>): string | undefined {
+  const childSessionKey = typeof payload.childSessionKey === "string" ? payload.childSessionKey : "";
+  const type = typeof payload.type === "string" ? payload.type : "";
+  if (!childSessionKey || !type) {
+    return undefined;
+  }
+  const identity =
+    typeof payload.toolCallId === "string"
+      ? payload.toolCallId
+      : typeof payload.messageId === "string"
+        ? payload.messageId
+        : undefined;
+  return identity ? `${childSessionKey}:${type}:${identity}` : undefined;
+}
+
+function getSubagentDisplay(childSessionKey: string): SubagentDisplayInfo {
+  return (
+    subagentDisplayByChildSessionKey.get(childSessionKey) ?? {
+      agentId: childSessionKey.split(":subagent:").pop() ?? childSessionKey,
+      label: childSessionKey.split(":subagent:").pop() ?? childSessionKey,
+    }
+  );
+}
+
+function deliverSubagentEvent(childSessionKey: string, payload: Record<string, unknown>): boolean {
+  const eventKey = subagentEventKey(payload);
+  const writer = getWriterForSessionOrChild(childSessionKey);
+  if (writer) {
+    writer(payload);
+    if (eventKey) {
+      deliveredSubagentEventKeys.add(eventKey);
+    }
+    return true;
+  }
+
+  const target = getPushSessionTargetForSessionOrChild(childSessionKey);
+  if (!target) {
+    return false;
+  }
+
+  sendPushEvent({
+    middlewareUrl: target.middlewareUrl,
+    agentId: target.agentId,
+    sessionId: target.sessionId,
+    event: payload,
+  }).catch(() => {});
+  if (eventKey) {
+    deliveredSubagentEventKeys.add(eventKey);
+  }
+  return true;
+}
+
+function hasDeliveredSubagentEvent(payload: Record<string, unknown>): boolean {
+  const eventKey = subagentEventKey(payload);
+  return Boolean(eventKey && deliveredSubagentEventKeys.has(eventKey));
+}
+
+function clearDeliveredSubagentEvents(childSessionKey: string): void {
+  const prefix = `${childSessionKey}:`;
+  for (const key of deliveredSubagentEventKeys) {
+    if (key.startsWith(prefix)) {
+      deliveredSubagentEventKeys.delete(key);
+    }
+  }
+}
+
+async function replayChildTranscript(childSessionKey: string, display: SubagentDisplayInfo): Promise<void> {
+  let messages: unknown[];
+  try {
+    const runtime = getPushChannelRuntime();
+    const result = await runtime.subagent.getSessionMessages({ sessionKey: childSessionKey });
+    messages = Array.isArray(result.messages) ? result.messages : [];
+  } catch {
+    return;
+  }
+
+  for (const event of createSubagentEventsFromMessages({
+    messages,
+    agentId: display.agentId,
+    label: display.label,
+    childSessionKey,
+  })) {
+    if (hasDeliveredSubagentEvent(event)) {
+      continue;
+    }
+    deliverSubagentEvent(childSessionKey, event);
+  }
+}
 
 function emitSubagentStart(
   event: { agentId?: unknown; label?: unknown; childSessionKey?: unknown },
@@ -19,37 +124,108 @@ function emitSubagentStart(
   if (!requesterSessionKey) {
     return;
   }
-  const writer = getWriter(requesterSessionKey);
-  if (!writer) {
-    return;
-  }
   const agentId = typeof event.agentId === "string" && event.agentId ? event.agentId : "subagent";
   const label = typeof event.label === "string" && event.label ? event.label : agentId;
   const childSessionKey =
     typeof event.childSessionKey === "string" ? event.childSessionKey : undefined;
   if (childSessionKey) {
     subagentDisplayByChildSessionKey.set(childSessionKey, { agentId, label });
+    bindChildSessionToParent(childSessionKey, requesterSessionKey);
   }
-  writer({
+  const payload = {
     type: "subagent_start",
     agentId,
     label,
     childSessionKey,
+  };
+  if (childSessionKey) {
+    deliverSubagentEvent(childSessionKey, payload);
+    return;
+  }
+  getWriter(requesterSessionKey)?.(payload);
+}
+
+function emitSubagentTranscriptUpdate(update: {
+  sessionKey?: string;
+  message?: unknown;
+  messageId?: string;
+}): void {
+  const childSessionKey = typeof update.sessionKey === "string" ? update.sessionKey : undefined;
+  if (!childSessionKey || !getParentSessionKeyForChild(childSessionKey) || update.message === undefined) {
+    return;
+  }
+
+  const display = getSubagentDisplay(childSessionKey);
+  for (const event of createSubagentEventsFromMessages({
+    messages: [{ ...(update.messageId ? { id: update.messageId } : {}), message: update.message }],
+    agentId: display.agentId,
+    label: display.label,
+    childSessionKey,
+  })) {
+    if (hasDeliveredSubagentEvent(event)) {
+      continue;
+    }
+    deliverSubagentEvent(childSessionKey, event);
+  }
+}
+
+function registerSubagentTranscriptUpdates(api: StreamingToolHookApi): void {
+  const unsubscribe = api.runtime?.events.onSessionTranscriptUpdate((update) => {
+    emitSubagentTranscriptUpdate(update);
+  });
+  if (!unsubscribe) {
+    return;
+  }
+  api.lifecycle?.registerRuntimeLifecycle({
+    id: "push-channel-subagent-transcript-updates",
+    description: "Unsubscribe push-channel child session transcript update streaming.",
+    cleanup: () => {
+      unsubscribe();
+    },
   });
 }
 
-export function registerStreamingToolHooks(api: Pick<OpenClawPluginApi, "on">): void {
+export function registerStreamingToolHooks(api: StreamingToolHookApi): void {
+  registerSubagentTranscriptUpdates(api);
+
   api.on("before_tool_call", (event, ctx) => {
     const sessionKey = ctx.sessionKey;
     if (!sessionKey) {
       return;
     }
-    const writer = getWriter(sessionKey);
+    const parentSessionKey = getParentSessionKeyForChild(sessionKey);
+    const writer = parentSessionKey ? undefined : getWriter(sessionKey);
     if (!writer) {
-      return;
+      if (!parentSessionKey) {
+        return;
+      }
     }
 
     const toolCallId = event.toolCallId ?? ctx.toolCallId ?? `tool-${randomUUID()}`;
+    if (parentSessionKey) {
+      const display = getSubagentDisplay(sessionKey);
+      const payload = {
+        type: "subagent_tool_call",
+        agentId: display.agentId,
+        label: display.label,
+        childSessionKey: sessionKey,
+        toolCallId,
+        toolName: event.toolName,
+        args: event.params ?? {},
+      };
+      if (hasDeliveredSubagentEvent(payload)) {
+        pushToolCallId(sessionKey, toolCallId);
+        return;
+      }
+      const delivered = deliverSubagentEvent(sessionKey, payload);
+      if (delivered) {
+        pushToolCallId(sessionKey, toolCallId);
+      }
+      return;
+    }
+    if (!writer) {
+      return;
+    }
     writer({
       type: "tool_call",
       toolCallId,
@@ -64,15 +240,41 @@ export function registerStreamingToolHooks(api: Pick<OpenClawPluginApi, "on">): 
     if (!sessionKey) {
       return;
     }
-    const writer = getWriter(sessionKey);
+    const parentSessionKey = getParentSessionKeyForChild(sessionKey);
+    const writer = parentSessionKey ? undefined : getWriter(sessionKey);
     const pendingToolCallId = popToolCallId(sessionKey);
     const toolCallId = event.toolCallId ?? ctx.toolCallId ?? pendingToolCallId;
-    if (!writer || !toolCallId) {
+    if ((!writer && !parentSessionKey) || !toolCallId) {
       return;
     }
     const message = event.message as
       | { content?: unknown; isError?: boolean; details?: unknown }
       | undefined;
+    if (parentSessionKey) {
+      const display = getSubagentDisplay(sessionKey);
+      const payload: Record<string, unknown> = {
+        type: "subagent_tool_result",
+        agentId: display.agentId,
+        label: display.label,
+        childSessionKey: sessionKey,
+        toolCallId,
+        toolName: event.toolName,
+      };
+      if (message?.content !== undefined) payload.content = message.content;
+      if (message?.isError !== undefined) payload.isError = message.isError;
+      if (message?.isError) {
+        payload.message =
+          typeof message.content === "string" ? message.content : "Subagent tool failed";
+      }
+      if (hasDeliveredSubagentEvent(payload)) {
+        return;
+      }
+      deliverSubagentEvent(sessionKey, payload);
+      return;
+    }
+    if (!writer) {
+      return;
+    }
     const payload: Record<string, unknown> = { type: "tool_result", toolCallId };
     if (message?.content !== undefined) payload.content = message.content;
     if (message?.isError !== undefined) payload.isError = message.isError;
@@ -88,13 +290,9 @@ export function registerStreamingToolHooks(api: Pick<OpenClawPluginApi, "on">): 
     emitSubagentStart(event, ctx.requesterSessionKey);
   });
 
-  api.on("subagent_ended", (event, ctx) => {
-    const requesterSessionKey = ctx.requesterSessionKey;
-    if (!requesterSessionKey) {
-      return;
-    }
-    const writer = getWriter(requesterSessionKey);
-    if (!writer) {
+  api.on("subagent_ended", async (event, ctx) => {
+    const requesterSessionKey = ctx.requesterSessionKey ?? getParentSessionKeyForChild(event.targetSessionKey);
+    if (!requesterSessionKey && !getParentSessionKeyForChild(event.targetSessionKey)) {
       return;
     }
     const display = subagentDisplayByChildSessionKey.get(event.targetSessionKey);
@@ -102,13 +300,16 @@ export function registerStreamingToolHooks(api: Pick<OpenClawPluginApi, "on">): 
       display?.agentId ?? event.targetSessionKey.split(":subagent:").pop() ?? event.targetSessionKey;
     const label = display?.label ?? subagentId;
     subagentDisplayByChildSessionKey.delete(event.targetSessionKey);
-    writer({
+    await replayChildTranscript(event.targetSessionKey, { agentId: subagentId, label });
+    deliverSubagentEvent(event.targetSessionKey, {
       type: "subagent_end",
       agentId: subagentId,
       label,
       childSessionKey: event.targetSessionKey,
       status: event.outcome === "ok" || event.reason === "subagent-complete" ? "success" : (event.outcome ?? event.reason),
     });
+    clearDeliveredSubagentEvents(event.targetSessionKey);
+    clearChildSessionBinding(event.targetSessionKey);
   });
 }
 

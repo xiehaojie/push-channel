@@ -94,3 +94,44 @@ test("send falls back to the socket subscribed to the session id", async (t) => 
   assert.equal(messages[0].sessionId, "session-1");
   assert.ok(messages[0].answerMessageId.startsWith("push-main:session-1-"));
 });
+
+test("send broadcasts structured subagent events without text streaming", async (t) => {
+  const messages = [];
+  connections.set("main", new Set([createOpenSocket(messages)]));
+  t.after(() => {
+    connections.delete("main");
+  });
+
+  const ctx = {
+    request: {
+      body: {
+        agentId: "main",
+        sessionId: "session-1",
+        event: {
+          type: "subagent_stream",
+          agentId: "coder",
+          childSessionKey: "agent:coder:subagent:child",
+          toolCallId: "tool-2",
+          toolName: "shell",
+          content: "Tool call: shell",
+        },
+      },
+    },
+  };
+
+  await pushController.send(ctx);
+
+  assert.equal(ctx.status, 200);
+  assert.equal(ctx.body, "Sent");
+  assert.deepEqual(messages, [
+    {
+      type: "subagent_stream",
+      agentId: "coder",
+      childSessionKey: "agent:coder:subagent:child",
+      toolCallId: "tool-2",
+      toolName: "shell",
+      content: "Tool call: shell",
+      sessionId: "session-1",
+    },
+  ]);
+});
