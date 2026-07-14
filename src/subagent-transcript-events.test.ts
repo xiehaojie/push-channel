@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createSubagentEventsFromMessages } from "./subagent-transcript-events.js";
+import {
+  createSubagentEventsFromMessages,
+  extractSubagentAssistantText,
+} from "./subagent-transcript-events.js";
 
 describe("subagent transcript event projection", () => {
   it("converts child assistant text, tool calls, and tool results into subagent events", () => {
@@ -118,5 +121,33 @@ describe("subagent transcript event projection", () => {
         args: { partialArgs: "{\"reason\":" },
       },
     ]);
+  });
+
+  it("extracts assistant text for main-agent result synthesis", () => {
+    expect(
+      extractSubagentAssistantText([
+        {
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "internal" },
+              { type: "text", text: "第一段结果" },
+            ],
+          },
+        },
+        {
+          message: {
+            role: "toolResult",
+            content: "tool payload should not be included",
+          },
+        },
+        {
+          message: {
+            role: "assistant",
+            content: "第二段结果",
+          },
+        },
+      ]),
+    ).toBe("第一段结果\n\n第二段结果");
   });
 });

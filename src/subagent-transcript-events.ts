@@ -47,6 +47,25 @@ function textFromBlock(block: Record<string, unknown>): string | undefined {
   return text ? text : undefined;
 }
 
+function assistantTextChunks(message: Record<string, unknown>): string[] {
+  if (typeof message.content === "string") {
+    const content = message.content.trim();
+    return content ? [content] : [];
+  }
+
+  const chunks: string[] = [];
+  for (const block of contentBlocks(message)) {
+    if (typeof block.type !== "string" || block.type !== "text") {
+      continue;
+    }
+    const content = textFromBlock(block);
+    if (content) {
+      chunks.push(content);
+    }
+  }
+  return chunks;
+}
+
 function partialArgsFromBlock(block: Record<string, unknown>): unknown {
   if (block.arguments !== undefined) {
     return block.arguments;
@@ -73,16 +92,10 @@ export function createSubagentEventsFromMessages(
     const role = typeof message.role === "string" ? message.role : "";
 
     if (role === "assistant") {
-      const textBlocks: string[] = [];
+      const textBlocks = assistantTextChunks(message);
       const assistantEvents: SubagentTranscriptEvent[] = [];
       for (const block of contentBlocks(message)) {
         const blockType = typeof block.type === "string" ? block.type : "";
-        if (blockType === "text") {
-          const content = textFromBlock(block);
-          if (content) {
-            textBlocks.push(content);
-          }
-        }
         if (blockType === "toolCall") {
           const toolCallId = typeof block.id === "string" ? block.id : undefined;
           const toolName = typeof block.name === "string" ? block.name : undefined;
@@ -140,4 +153,20 @@ export function createSubagentEventsFromMessages(
     }
   }
   return events;
+}
+
+export function extractSubagentAssistantText(messages: unknown[]): string {
+  const chunks: string[] = [];
+  for (const entry of messages) {
+    const { message } = normalizeMessageEntry(entry);
+    if (!message) {
+      continue;
+    }
+    const role = typeof message.role === "string" ? message.role : "";
+    if (role !== "assistant") {
+      continue;
+    }
+    chunks.push(...assistantTextChunks(message));
+  }
+  return chunks.join("\n\n").trim();
 }

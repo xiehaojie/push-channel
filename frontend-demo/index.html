@@ -59,6 +59,7 @@
         let sdk = null;
         let isToolRunning = false;
         const localQueryIds = new Set();
+        const subagentTextQueues = new WeakMap();
 
         const connectForm = document.getElementById('connect-form');
         const disconnectBtn = document.getElementById('disconnect-btn');
@@ -196,11 +197,51 @@
             if (status) status.textContent = statusText;
         }
 
+        function queueSubagentTypedText(element, text, options = {}) {
+            if (!element || !text) return;
+            const chars = Array.from(String(text));
+            if (chars.length === 0) return;
+
+            const previous = subagentTextQueues.get(element) || Promise.resolve();
+            const next = previous.catch(() => {}).then(() => new Promise((resolve) => {
+                let index = 0;
+                if (options.newline && element.textContent) {
+                    element.textContent += '\n';
+                }
+
+                const tick = () => {
+                    element.textContent += chars[index] || '';
+                    index += 1;
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                    if (index < chars.length) {
+                        setTimeout(tick, 12);
+                    } else {
+                        resolve();
+                    }
+                };
+
+                tick();
+            }));
+
+            subagentTextQueues.set(element, next);
+        }
+
         function appendSubagentProgress(data, text) {
             const card = ensureSubagentCard(data);
             const progress = card.querySelector('.subagent-progress');
             if (progress && text) {
-                progress.textContent += `${progress.textContent ? '\n' : ''}${text}`;
+                queueSubagentTypedText(progress, text, { newline: true });
+            }
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            return card;
+        }
+
+        function appendSubagentStream(data, text) {
+            const card = ensureSubagentCard(data);
+            const progress = card.querySelector('.subagent-progress');
+            if (progress && text) {
+                progress.dataset.hasLiveStream = 'true';
+                queueSubagentTypedText(progress, text);
             }
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
             return card;
@@ -372,14 +413,20 @@
 
             sdk.onSubagentStream((data) => {
                 if (!isCurrentSession(data)) return;
-                const card = appendSubagentProgress(data, data.content || '');
+                const card = appendSubagentStream(data, data.content || data.delta || '');
                 updateSubagentStatus(card, 'Running', 'subagent-running');
             });
 
             sdk.onSubagentMessage((data) => {
                 if (!isCurrentSession(data)) return;
-                const card = appendSubagentProgress(data, data.content || '');
-                updateSubagentStatus(card, 'Running', 'subagent-running');
+                const card = ensureSubagentCard(data);
+                const progress = card.querySelector('.subagent-progress');
+                if (progress && progress.dataset.hasLiveStream === 'true') {
+                    updateSubagentStatus(card, 'Running', 'subagent-running');
+                    return;
+                }
+                const nextCard = appendSubagentProgress(data, data.content || '');
+                updateSubagentStatus(nextCard, 'Running', 'subagent-running');
             });
 
             sdk.onSubagentToolCall((data) => {

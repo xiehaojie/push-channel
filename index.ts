@@ -27,6 +27,7 @@ type StreamingToolHookApi = Pick<OpenClawPluginApi, "on"> &
 
 const subagentDisplayByChildSessionKey = new Map<string, SubagentDisplayInfo>();
 const deliveredSubagentEventKeys = new Set<string>();
+const streamedSubagentTextByMessageKey = new Map<string, string>();
 
 function subagentEventKey(payload: Record<string, unknown>): string | undefined {
   const childSessionKey = typeof payload.childSessionKey === "string" ? payload.childSessionKey : "";
@@ -92,6 +93,74 @@ function clearDeliveredSubagentEvents(childSessionKey: string): void {
       deliveredSubagentEventKeys.delete(key);
     }
   }
+  for (const key of streamedSubagentTextByMessageKey.keys()) {
+    if (key.startsWith(prefix)) {
+      streamedSubagentTextByMessageKey.delete(key);
+    }
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readAssistantText(message: unknown): string | undefined {
+  const record = asRecord(message);
+  if (!record || record.role !== "assistant" || !Array.isArray(record.content)) {
+    return undefined;
+  }
+  const chunks: string[] = [];
+  for (const block of record.content) {
+    const blockRecord = asRecord(block);
+    if (blockRecord?.type === "text" && typeof blockRecord.text === "string") {
+      chunks.push(blockRecord.text);
+    }
+  }
+  const text = chunks.join("\n\n");
+  return text ? text : undefined;
+}
+
+function emitSubagentStreamDelta(update: {
+  childSessionKey: string;
+  display: SubagentDisplayInfo;
+  message?: unknown;
+  messageId?: string;
+}): void {
+  const fullText = readAssistantText(update.message);
+  if (!fullText) {
+    return;
+  }
+  const messageKey = `${update.childSessionKey}:${update.messageId ?? "__latest"}`;
+  const previousText = streamedSubagentTextByMessageKey.get(messageKey) ?? "";
+  if (!fullText.startsWith(previousText)) {
+    streamedSubagentTextByMessageKey.set(messageKey, fullText);
+    deliverSubagentEvent(update.childSessionKey, {
+      type: "subagent_stream",
+      agentId: update.display.agentId,
+      label: update.display.label,
+      childSessionKey: update.childSessionKey,
+      ...(update.messageId ? { messageId: update.messageId } : {}),
+      content: fullText,
+      delta: fullText,
+    });
+    return;
+  }
+  const delta = fullText.slice(previousText.length);
+  if (!delta) {
+    return;
+  }
+  streamedSubagentTextByMessageKey.set(messageKey, fullText);
+  deliverSubagentEvent(update.childSessionKey, {
+    type: "subagent_stream",
+    agentId: update.display.agentId,
+    label: update.display.label,
+    childSessionKey: update.childSessionKey,
+    ...(update.messageId ? { messageId: update.messageId } : {}),
+    content: delta,
+    delta,
+  });
 }
 
 async function replayChildTranscript(childSessionKey: string, display: SubagentDisplayInfo): Promise<void> {
@@ -156,12 +225,21 @@ function emitSubagentTranscriptUpdate(update: {
   }
 
   const display = getSubagentDisplay(childSessionKey);
+  emitSubagentStreamDelta({
+    childSessionKey,
+    display,
+    message: update.message,
+    messageId: update.messageId,
+  });
   for (const event of createSubagentEventsFromMessages({
     messages: [{ ...(update.messageId ? { id: update.messageId } : {}), message: update.message }],
     agentId: display.agentId,
     label: display.label,
     childSessionKey,
   })) {
+    if (event.type === "subagent_message") {
+      continue;
+    }
     if (hasDeliveredSubagentEvent(event)) {
       continue;
     }

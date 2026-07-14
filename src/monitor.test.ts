@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { monitorPushChannel } from "./monitor.js";
+import { testing as monitorTesting } from "./monitor.js";
 import { setPushChannelRuntime } from "./runtime.js";
+import { testing as subagentOrchestratorTesting } from "./subagent-orchestrator.js";
 
 async function allocatePort(): Promise<number> {
   const server = http.createServer();
@@ -37,8 +38,15 @@ async function waitForServer(url: string): Promise<void> {
   throw lastError;
 }
 
+function startMonitorPushChannel(
+  opts: Parameters<typeof import("./monitor.js").monitorPushChannel>[0],
+): Promise<void> {
+  return import("./monitor.js").then(({ monitorPushChannel }) => monitorPushChannel(opts));
+}
+
 describe("push-channel monitor", () => {
   afterEach(() => {
+    subagentOrchestratorTesting.setSpawnMentionedSubagentImplForTest();
     vi.restoreAllMocks();
   });
 
@@ -79,7 +87,7 @@ describe("push-channel monitor", () => {
       },
     } as unknown as PluginRuntime);
 
-    const monitor = monitorPushChannel({
+    const monitor = startMonitorPushChannel({
       config: {
         channels: {
           "push-channel": {
@@ -127,14 +135,53 @@ describe("push-channel monitor", () => {
     }
   });
 
-  it("injects required mentioned agents into the main agent body", async () => {
+  it("spawns mentioned agents directly and returns their results to the main agent", async () => {
     const port = await allocatePort();
     const abortController = new AbortController();
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "push-channel-mentions-test-"));
     const storePath = path.join(tmpDir, "sessions.json");
     let finalizedContext: Record<string, unknown> | null = null;
     const dispatchReplyFromConfig = vi.fn(async () => ({ text: "ok" }));
+    const waitForRun = vi.fn(async () => ({ status: "ok" as const }));
+    const getSessionMessages = vi.fn(async (params: { sessionKey: string }) => ({
+      messages: [
+        {
+          id: `${params.sessionKey}:assistant`,
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: params.sessionKey.includes("researcher")
+                  ? "Researcher found the background."
+                  : "Coder produced the implementation notes.",
+              },
+            ],
+          },
+        },
+      ],
+    }));
+    const spawnMentionedSubagent = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: "accepted",
+        runId: "run-researcher",
+        childSessionKey: "agent:researcher:subagent:child-a",
+      })
+      .mockResolvedValueOnce({
+        status: "accepted",
+        runId: "run-coder",
+        childSessionKey: "agent:coder:subagent:child-b",
+      });
+    subagentOrchestratorTesting.setSpawnMentionedSubagentImplForTest(spawnMentionedSubagent);
     setPushChannelRuntime({
+      subagent: {
+        run: vi.fn(),
+        waitForRun,
+        getSessionMessages,
+        getSession: vi.fn(async () => ({ messages: [] })),
+        deleteSession: vi.fn(async () => {}),
+      },
       channel: {
         session: {
           resolveStorePath: vi.fn(() => storePath),
@@ -165,7 +212,7 @@ describe("push-channel monitor", () => {
       },
     } as unknown as PluginRuntime);
 
-    const monitor = monitorPushChannel({
+    const monitor = startMonitorPushChannel({
       config: {
         channels: {
           "push-channel": {
@@ -199,14 +246,57 @@ describe("push-channel monitor", () => {
       await response.text();
 
       expect(dispatchReplyFromConfig).toHaveBeenCalledTimes(1);
+      expect(spawnMentionedSubagent).toHaveBeenCalledTimes(2);
+      expect(spawnMentionedSubagent).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          task: "please coordinate this",
+          agentId: "researcher",
+          label: "Researcher",
+          parentSessionKey: "agent:main:channel:push-channel:direct:demo-session",
+          requesterAgentId: "main",
+        }),
+      );
+      expect(spawnMentionedSubagent).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          task: "please coordinate this",
+          agentId: "coder",
+          label: "Coder",
+          parentSessionKey: "agent:main:channel:push-channel:direct:demo-session",
+          requesterAgentId: "main",
+        }),
+      );
+      expect(waitForRun).toHaveBeenCalledTimes(2);
+      expect(waitForRun).toHaveBeenCalledWith({
+        runId: "run-researcher",
+        timeoutMs: monitorTesting.MENTION_SUBAGENT_WAIT_TIMEOUT_MS,
+      });
+      expect(waitForRun).toHaveBeenCalledWith({
+        runId: "run-coder",
+        timeoutMs: monitorTesting.MENTION_SUBAGENT_WAIT_TIMEOUT_MS,
+      });
+      expect(getSessionMessages).toHaveBeenCalledWith({
+        sessionKey: "agent:researcher:subagent:child-a",
+      });
+      expect(getSessionMessages).toHaveBeenCalledWith({
+        sessionKey: "agent:coder:subagent:child-b",
+      });
       expect(finalizedContext).not.toBeNull();
       const bodyForAgent = String(finalizedContext?.["BodyForAgent"] ?? "");
-      expect(bodyForAgent).toContain("Required mentioned agents");
-      expect(bodyForAgent).toContain("@researcher");
-      expect(bodyForAgent).toContain("@coder");
-      expect(bodyForAgent).toContain("must delegate");
+      expect(bodyForAgent).toBe("please coordinate this");
       expect(finalizedContext?.["OriginatingTo"]).toBe("demo-session");
       expect(finalizedContext?.["WasMentioned"]).toBe(true);
+      const dispatchedCtx = dispatchReplyFromConfig.mock.calls[0]?.[0]?.ctx as
+        | Record<string, unknown>
+        | undefined;
+      const dispatchedBodyForAgent = String(dispatchedCtx?.["BodyForAgent"] ?? "");
+      expect(dispatchedBodyForAgent).toContain("用户原始任务：\nplease coordinate this");
+      expect(dispatchedBodyForAgent).toContain("## Researcher (@researcher)");
+      expect(dispatchedBodyForAgent).toContain("Researcher found the background.");
+      expect(dispatchedBodyForAgent).toContain("## Coder (@coder)");
+      expect(dispatchedBodyForAgent).toContain("Coder produced the implementation notes.");
+      expect(dispatchedCtx?.["WasMentioned"]).toBe(false);
     } finally {
       abortController.abort();
       await monitor;
@@ -251,7 +341,7 @@ describe("push-channel monitor", () => {
       },
     } as unknown as PluginRuntime);
 
-    const monitor = monitorPushChannel({
+    const monitor = startMonitorPushChannel({
       config: {
         channels: {
           "push-channel": {

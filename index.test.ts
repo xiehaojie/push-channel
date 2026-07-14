@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerStreamingToolHooks } from "./index.js";
 import { sendPushEvent } from "./src/send.js";
+import { testing as monitorTesting } from "./src/monitor.js";
 import { setPushChannelRuntime } from "./src/runtime.js";
+import { testing as subagentOrchestratorTesting } from "./src/subagent-orchestrator.js";
 import { clearWriter, rememberPushSessionTarget, setWriter } from "./src/tool-store.js";
 
 vi.mock("./src/send.js", () => ({
@@ -9,6 +11,64 @@ vi.mock("./src/send.js", () => ({
 }));
 
 describe("push-channel subagent hook streaming", () => {
+  it("waits for mentioned subagents with the push-channel timeout budget", async () => {
+    const waitForRun = vi.fn(async () => ({ status: "success" }));
+    const getSessionMessages = vi.fn(async () => ({
+      messages: [
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: "完成了",
+          },
+        },
+      ],
+    }));
+    subagentOrchestratorTesting.setSpawnMentionedSubagentImplForTest(async () => ({
+      status: "accepted",
+      runId: "run-1",
+      childSessionKey: "agent:researcher:subagent:child",
+    }));
+
+    try {
+      await monitorTesting.dispatchMentionedSubagents({
+        core: {
+          subagent: {
+            waitForRun,
+            getSessionMessages,
+          },
+        } as never,
+        account: {
+          accountId: "push-account",
+          enabled: true,
+          configured: true,
+          config: {
+            enabled: true,
+            listenPort: 18080,
+            listenPath: "/push-channel",
+          },
+        },
+        payload: {
+          agentId: "main",
+          sessionId: "session-1",
+          content: "@researcher 调研一下",
+          mentions: [{ agentId: "researcher", label: "Researcher" }],
+        },
+        parentSessionKey: "agent:main:channel:push-channel:direct:session-1",
+        channelId: "push-channel",
+        log: vi.fn(),
+      });
+
+      expect(waitForRun).toHaveBeenCalledWith({
+        runId: "run-1",
+        timeoutMs: monitorTesting.MENTION_SUBAGENT_WAIT_TIMEOUT_MS,
+      });
+      expect(monitorTesting.MENTION_SUBAGENT_WAIT_TIMEOUT_MS).toBe(5 * 60 * 1000);
+    } finally {
+      subagentOrchestratorTesting.setSpawnMentionedSubagentImplForTest();
+    }
+  });
+
   it("emits subagent_start from the current subagent_spawned hook", async () => {
     const handlers = new Map<string, (event: Record<string, unknown>, ctx: Record<string, unknown>) => void>();
     const api = {
@@ -260,6 +320,14 @@ describe("push-channel subagent hook streaming", () => {
         messageId: "assistant-live-1",
         message: {
           role: "assistant",
+          content: [{ type: "text", text: "我开始" }],
+        },
+      });
+      transcriptListener?.({
+        sessionKey: childSessionKey,
+        messageId: "assistant-live-1",
+        message: {
+          role: "assistant",
           content: [
             { type: "text", text: "我开始查资料。" },
             {
@@ -285,12 +353,22 @@ describe("push-channel subagent hook streaming", () => {
 
       expect(events.slice(1)).toEqual([
         {
-          type: "subagent_message",
+          type: "subagent_stream",
           agentId: "researcher",
           label: "Researcher",
           childSessionKey,
           messageId: "assistant-live-1",
-          content: "我开始查资料。",
+          content: "我开始",
+          delta: "我开始",
+        },
+        {
+          type: "subagent_stream",
+          agentId: "researcher",
+          label: "Researcher",
+          childSessionKey,
+          messageId: "assistant-live-1",
+          content: "查资料。",
+          delta: "查资料。",
         },
         {
           type: "subagent_tool_call",

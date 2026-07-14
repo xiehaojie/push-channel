@@ -12,7 +12,11 @@ import {
   createStreamingReplyDispatcher,
 } from "./reply-dispatcher.js";
 import { getPushChannelRuntime } from "./runtime.js";
+import { sendPushEvent } from "./send.js";
 import { rememberPushChannelSessionRoute } from "./session-routes.js";
+import { extractSubagentAssistantText } from "./subagent-transcript-events.js";
+import { spawnMentionedSubagent } from "./subagent-orchestrator.js";
+import { clearWriter, rememberPushSessionTarget } from "./tool-store.js";
 import type { PushChannelMention, ResolvedPushChannelAccount } from "./types.js";
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 
@@ -27,6 +31,7 @@ type IncomingPushPayload = {
 const sessionDispatchLocks = new Map<string, Promise<void>>();
 
 const DEBUG_ENABLED = process.env.PUSH_CHANNEL_DEBUG === "1";
+const MENTION_SUBAGENT_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 
 type FileFingerprint = {
   exists: boolean;
@@ -75,6 +80,15 @@ type MonitorPushChannelOptions = {
   setStatus?: (next: ChannelAccountSnapshot) => void;
 };
 
+type MentionedSubagentResult = {
+  agentId: string;
+  label: string;
+  childSessionKey?: string;
+  status: "success" | "error" | "timeout" | "rejected";
+  content?: string;
+  error?: string;
+};
+
 function formatError(error: unknown): string {
   if (error instanceof Error) {
     return error.stack ?? error.message;
@@ -121,23 +135,7 @@ function parseMentions(value: unknown): PushChannelMention[] | undefined {
 }
 
 function buildAgentFacingContent(payload: IncomingPushPayload): string {
-  const mentions = payload.mentions ?? [];
-  if (mentions.length === 0) {
-    return payload.content;
-  }
-  const targets = mentions
-    .map((mention) =>
-      mention.label && mention.label !== mention.agentId
-        ? `@${mention.agentId} (${mention.label})`
-        : `@${mention.agentId}`,
-    )
-    .join(", ");
-  return (
-    `${payload.content}\n\n` +
-    `[System: Required mentioned agents: ${targets}. ` +
-    `The user explicitly mentioned these agents as strong constraints. ` +
-    `You must delegate work to every listed agent and return their progress and final results to this same push-channel session.]`
-  );
+  return payload.content;
 }
 
 function closeServer(server: http.Server): Promise<void> {
@@ -426,6 +424,14 @@ async function handleIncomingMessage(
         sessionId: payload.sessionId,
       });
 
+  if (account.config.middlewareUrl) {
+    rememberPushSessionTarget(sessionKey, {
+      middlewareUrl: account.config.middlewareUrl,
+      agentId: payload.agentId,
+      sessionId: payload.sessionId,
+    });
+  }
+
   const agentFacingContent = buildAgentFacingContent(payload);
   const wasMentioned = (payload.mentions?.length ?? 0) > 0;
   const ctxPayload = replyModule.finalizeInboundContext({
@@ -481,21 +487,62 @@ async function handleIncomingMessage(
     }
 
     try {
-      await replyModule.withReplyDispatcher({
-        dispatcher,
-        onSettled: () => {},
-        run: () =>
-          replyModule.dispatchReplyFromConfig({
-            ctx: ctxPayload,
-            cfg,
+      if ((payload.mentions?.length ?? 0) > 0) {
+        try {
+          const subagentResults = await dispatchMentionedSubagents({
+            core,
+            account,
+            payload,
+            parentSessionKey: sessionKey,
+            channelId,
+            res,
+            log,
+          });
+          const mainAgentContent = buildMainAgentContentWithSubagentResults(
+            payload,
+            subagentResults,
+          );
+          const mainCtxPayload = {
+            ...ctxPayload,
+            BodyForAgent: mainAgentContent,
+            CommandBody: mainAgentContent,
+            WasMentioned: false,
+          };
+          await replyModule.withReplyDispatcher({
             dispatcher,
-            replyOptions: {
-              onModelSelected: () => {},
-              disableBlockStreaming: !res,
-              ...(streaming ? { onPartialReply: streaming.onPartialReply } : {}),
-            },
-          }),
-      });
+            onSettled: () => {},
+            run: () =>
+              replyModule.dispatchReplyFromConfig({
+                ctx: mainCtxPayload,
+                cfg,
+                dispatcher,
+                replyOptions: {
+                  onModelSelected: () => {},
+                  disableBlockStreaming: !res,
+                  ...(streaming ? { onPartialReply: streaming.onPartialReply } : {}),
+                },
+              }),
+          });
+        } finally {
+          clearWriter(sessionKey);
+        }
+      } else {
+        await replyModule.withReplyDispatcher({
+          dispatcher,
+          onSettled: () => {},
+          run: () =>
+            replyModule.dispatchReplyFromConfig({
+              ctx: ctxPayload,
+              cfg,
+              dispatcher,
+              replyOptions: {
+                onModelSelected: () => {},
+                disableBlockStreaming: !res,
+                ...(streaming ? { onPartialReply: streaming.onPartialReply } : {}),
+              },
+            }),
+        });
+      }
     } catch (error) {
       const errName = error instanceof Error ? error.constructor.name : typeof error;
       const fpAtError = transcriptPath ? fingerprintFile(transcriptPath) : null;
@@ -516,4 +563,226 @@ async function handleIncomingMessage(
       );
     }
   });
+}
+
+async function dispatchMentionedSubagents(params: {
+  core: PluginRuntime;
+  account: ResolvedPushChannelAccount;
+  payload: IncomingPushPayload;
+  parentSessionKey: string;
+  channelId: string;
+  res?: http.ServerResponse;
+  log: (msg: string) => void;
+}): Promise<MentionedSubagentResult[]> {
+  const mentions = params.payload.mentions ?? [];
+  return await Promise.all(
+    mentions.map(async (mention) => {
+      const label = mention.label ?? mention.agentId;
+      const result = await spawnMentionedSubagent({
+        task: params.payload.content,
+        agentId: mention.agentId,
+        label: mention.label,
+        parentSessionKey: params.parentSessionKey,
+        channelId: params.channelId,
+        accountId: params.account.accountId,
+        sessionId: params.payload.sessionId,
+        requesterAgentId: params.payload.agentId,
+      });
+
+      if (result.status !== "accepted") {
+        const error = result.error ?? "Subagent spawn failed";
+        emitMentionSubagentEvent(params, {
+          type: "subagent_error",
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          message: error,
+        });
+        emitMentionSubagentEvent(params, {
+          type: "subagent_end",
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          status: result.status,
+        });
+        return {
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          status: "rejected",
+          error,
+        };
+      }
+
+      if (!result.runId) {
+        const error = "Mentioned subagent accepted without runId";
+        params.log(`[PushChannel] ${error}: agentId=${mention.agentId}`);
+        emitMentionSubagentEvent(params, {
+          type: "subagent_error",
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          message: error,
+        });
+        emitMentionSubagentEvent(params, {
+          type: "subagent_end",
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          status: "error",
+        });
+        return {
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          status: "error",
+          error,
+        };
+      }
+
+      const waitResult = await params.core.subagent.waitForRun({
+        runId: result.runId,
+        timeoutMs: MENTION_SUBAGENT_WAIT_TIMEOUT_MS,
+      });
+      if (waitResult.status === "error") {
+        const error = waitResult.error ?? "Subagent run failed";
+        emitMentionSubagentEvent(params, {
+          type: "subagent_error",
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          message: error,
+        });
+        emitMentionSubagentEvent(params, {
+          type: "subagent_end",
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          status: "error",
+        });
+        return {
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          status: "error",
+          error,
+          content: await readMentionedSubagentResultText(params.core, result.childSessionKey),
+        };
+      } else if (waitResult.status === "timeout") {
+        const error = "Subagent run timed out before completion";
+        emitMentionSubagentEvent(params, {
+          type: "subagent_error",
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          message: error,
+        });
+        emitMentionSubagentEvent(params, {
+          type: "subagent_end",
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          status: "timeout",
+        });
+        return {
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          status: "timeout",
+          error,
+          content: await readMentionedSubagentResultText(params.core, result.childSessionKey),
+        };
+      }
+
+      const content = await readMentionedSubagentResultText(params.core, result.childSessionKey);
+      return {
+        agentId: mention.agentId,
+        label,
+        childSessionKey: result.childSessionKey,
+        status: "success",
+        ...(content ? { content } : { error: "Subagent completed without assistant text" }),
+      };
+    }),
+  );
+}
+
+export const testing = {
+  MENTION_SUBAGENT_WAIT_TIMEOUT_MS,
+  dispatchMentionedSubagents,
+};
+
+async function readMentionedSubagentResultText(
+  core: PluginRuntime,
+  childSessionKey?: string,
+): Promise<string | undefined> {
+  if (!childSessionKey) {
+    return undefined;
+  }
+  try {
+    const result = await core.subagent.getSessionMessages({ sessionKey: childSessionKey });
+    const messages = Array.isArray(result.messages) ? result.messages : [];
+    const content = extractSubagentAssistantText(messages);
+    return content || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildMainAgentContentWithSubagentResults(
+  payload: IncomingPushPayload,
+  results: MentionedSubagentResult[],
+): string {
+  const sections = results.map((result) => {
+    const title = `## ${result.label} (@${result.agentId})`;
+    const status = `状态：${formatSubagentResultStatus(result.status)}`;
+    const content = result.content ? `结果：\n${result.content}` : undefined;
+    const error = result.error ? `异常：${result.error}` : undefined;
+    return [title, status, content, error].filter(Boolean).join("\n\n");
+  });
+
+  return [
+    "用户原始任务：",
+    payload.content,
+    "",
+    "以下是被 @ 的专家智能体执行结果。请基于这些结果给用户返回最终答案。",
+    "不要重复描述调度过程；如果某个专家失败或没有产出，请在最终答案中简洁说明影响。",
+    "",
+    sections.join("\n\n---\n\n"),
+  ].join("\n");
+}
+
+function formatSubagentResultStatus(status: MentionedSubagentResult["status"]): string {
+  switch (status) {
+    case "success":
+      return "完成";
+    case "timeout":
+      return "超时";
+    case "rejected":
+      return "未启动";
+    case "error":
+      return "失败";
+  }
+}
+
+function emitMentionSubagentEvent(
+  params: {
+    account: ResolvedPushChannelAccount;
+    payload: IncomingPushPayload;
+    res?: http.ServerResponse;
+  },
+  event: Record<string, unknown>,
+): void {
+  if (params.res && !params.res.writableEnded) {
+    params.res.write(`data: ${JSON.stringify(event)}\n\n`);
+    return;
+  }
+  if (!params.account.config.middlewareUrl) {
+    return;
+  }
+  sendPushEvent({
+    middlewareUrl: params.account.config.middlewareUrl,
+    agentId: params.payload.agentId,
+    sessionId: params.payload.sessionId,
+    event,
+  }).catch(() => {});
 }
