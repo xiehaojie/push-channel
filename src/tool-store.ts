@@ -8,9 +8,17 @@
 
 export type SseWriter = (event: Record<string, unknown>) => void;
 
+export type PushSessionTarget = {
+  middlewareUrl: string;
+  agentId: string;
+  sessionId?: string;
+};
+
 type PushChannelToolStoreState = {
   writerStore: Map<string, SseWriter>;
   pendingStacks: Map<string, string[]>;
+  childParentSessions: Map<string, string>;
+  pushSessionTargets: Map<string, PushSessionTarget>;
 };
 
 const PUSH_CHANNEL_TOOL_STORE_KEY = Symbol.for("openclaw.pushChannel.toolStore");
@@ -19,11 +27,16 @@ function getToolStoreState(): PushChannelToolStoreState {
   const globalStore = globalThis as Record<PropertyKey, unknown>;
   const existing = globalStore[PUSH_CHANNEL_TOOL_STORE_KEY];
   if (existing) {
-    return existing as PushChannelToolStoreState;
+    const state = existing as Partial<PushChannelToolStoreState>;
+    state.childParentSessions ??= new Map<string, string>();
+    state.pushSessionTargets ??= new Map<string, PushSessionTarget>();
+    return state as PushChannelToolStoreState;
   }
   const created: PushChannelToolStoreState = {
     writerStore: new Map<string, SseWriter>(),
     pendingStacks: new Map<string, string[]>(),
+    childParentSessions: new Map<string, string>(),
+    pushSessionTargets: new Map<string, PushSessionTarget>(),
   };
   globalStore[PUSH_CHANNEL_TOOL_STORE_KEY] = created;
   return created;
@@ -32,6 +45,8 @@ function getToolStoreState(): PushChannelToolStoreState {
 const state = getToolStoreState();
 const writerStore = state.writerStore;
 const pendingStacks = state.pendingStacks;
+const childParentSessions = state.childParentSessions;
+const pushSessionTargets = state.pushSessionTargets;
 
 // --- SSE writer ---
 
@@ -43,9 +58,46 @@ export function getWriter(sessionKey: string): SseWriter | undefined {
   return writerStore.get(sessionKey);
 }
 
+export function getParentSessionKeyForChild(childSessionKey: string): string | undefined {
+  return childParentSessions.get(childSessionKey);
+}
+
+export function getWriterForSessionOrChild(sessionKey: string): SseWriter | undefined {
+  return writerStore.get(sessionKey) ?? writerStore.get(childParentSessions.get(sessionKey) ?? "");
+}
+
+export function bindChildSessionToParent(childSessionKey: string, parentSessionKey: string): void {
+  childParentSessions.set(childSessionKey, parentSessionKey);
+}
+
+export function rememberPushSessionTarget(
+  sessionKey: string,
+  target: PushSessionTarget,
+): void {
+  if (!target.middlewareUrl || !target.agentId) {
+    return;
+  }
+  pushSessionTargets.set(sessionKey, target);
+}
+
+export function getPushSessionTargetForSessionOrChild(
+  sessionKey: string,
+): PushSessionTarget | undefined {
+  return (
+    pushSessionTargets.get(sessionKey) ??
+    pushSessionTargets.get(childParentSessions.get(sessionKey) ?? "")
+  );
+}
+
+export function clearChildSessionBinding(childSessionKey: string): void {
+  childParentSessions.delete(childSessionKey);
+  pendingStacks.delete(childSessionKey);
+}
+
 export function clearWriter(sessionKey: string): void {
   writerStore.delete(sessionKey);
   pendingStacks.delete(sessionKey);
+  childParentSessions.delete(sessionKey);
 }
 
 // --- Pending toolCallId stack ---

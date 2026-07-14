@@ -262,6 +262,54 @@ button:disabled {
     font-weight: 600;
 }
 
+.subagent-tools {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.subagent-tool-call {
+    background: #f8fbff;
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: #1e3a8a;
+}
+
+.subagent-tool-call.tool-done {
+    background: #f0fdf4;
+    border-color: #bbf7d0;
+    color: #166534;
+}
+
+.subagent-tool-call.tool-error {
+    background: #fef2f2;
+    border-color: #fecaca;
+    color: #991b1b;
+}
+
+.subagent-tool-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.subagent-tool-args,
+.subagent-tool-result {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.8rem;
+    font-family: inherit;
+}
+
+.subagent-tool-result {
+    border-top: 1px solid rgba(37, 99, 235, 0.14);
+    margin-top: 8px;
+    padding-top: 8px;
+}
+
 .tool-args {
     margin: 6px 0 0;
     padding: 7px 9px;

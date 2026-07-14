@@ -1,6 +1,6 @@
 import type { ServerResponse } from "node:http";
 import { sendPushMessage } from "./send.js";
-import { setWriter, clearWriter } from "./tool-store.js";
+import { setWriter, clearWriter, rememberPushSessionTarget } from "./tool-store.js";
 
 const REQUEST_TIMEOUT_HINT = "Request timed out before a response was generated";
 
@@ -20,7 +20,15 @@ function resolvePayloadText(payload: ReplyTextPayload): string {
   return typeof payload.content === "string" ? payload.content : "";
 }
 
-export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?: string) {
+export function createStreamingReplyDispatcher(
+  res: ServerResponse,
+  sessionKey?: string,
+  pushTarget?: {
+    middlewareUrl?: string;
+    agentId: string;
+    sessionId?: string;
+  },
+) {
   // Send initial headers
   if (!res.headersSent) {
     res.writeHead(200, {
@@ -66,6 +74,13 @@ export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?:
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       }
     });
+    if (pushTarget?.middlewareUrl) {
+      rememberPushSessionTarget(sessionKey, {
+        middlewareUrl: pushTarget.middlewareUrl,
+        agentId: pushTarget.agentId,
+        sessionId: pushTarget.sessionId,
+      });
+    }
   }
 
   const onPartialReply = (payload: ReplyTextPayload) => {

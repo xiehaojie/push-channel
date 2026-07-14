@@ -35,10 +35,13 @@ class PushController {
         const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : '';
         const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
         const content = body.content;
+        const event = body.event && typeof body.event === 'object' && !Array.isArray(body.event)
+            ? body.event
+            : null;
 
-        if (!agentId || !content) {
+        if (!agentId || (!content && !event)) {
             ctx.status = 400;
-            ctx.body = "Missing agentId or content";
+            ctx.body = "Missing agentId or content/event";
             return;
         }
 
@@ -51,6 +54,21 @@ class PushController {
 
         const sockets = connections.get(deliveryAgentId);
         if (sockets && sockets.size > 0) {
+            if (event) {
+                if (typeof event.type !== 'string' || !event.type.trim()) {
+                    ctx.status = 400;
+                    ctx.body = "Invalid event";
+                    return;
+                }
+                broadcastToSession(deliveryAgentId, sessionId, {
+                    ...event,
+                    sessionId: sessionId || event.sessionId,
+                });
+                ctx.status = 200;
+                ctx.body = "Sent";
+                return;
+            }
+
             const chunkSize = 5;
             const delay = 50;
             const answerMessageId = nextAnswerMessageId(deliveryAgentId, sessionId || deliveryAgentId);
