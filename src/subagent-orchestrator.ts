@@ -1,4 +1,11 @@
-import { spawnSubagentDirect } from "../../../src/agents/subagent-spawn.js";
+import { randomUUID } from "node:crypto";
+import { getPushChannelRuntime } from "./runtime.js";
+import {
+  bindChildSessionToParent,
+  clearChildSessionBinding,
+  getWriterForSessionOrChild,
+  rememberSubagentDisplay,
+} from "./tool-store.js";
 
 export type PushChannelSubagentSpawnParams = {
   task: string;
@@ -20,27 +27,40 @@ export async function spawnMentionedSubagent(params: PushChannelSubagentSpawnPar
 }
 
 async function spawnMentionedSubagentDirect(params: PushChannelSubagentSpawnParams) {
-  const displayLabel = params.label?.trim();
-  void displayLabel;
-  return await spawnSubagentDirect(
-    {
-      task: params.task,
-      agentId: params.agentId,
-      mode: "run",
-      cleanup: "keep",
-      context: "isolated",
-      expectsCompletionMessage: false,
-    },
-    {
-      agentSessionKey: params.parentSessionKey,
-      completionOwnerKey: params.parentSessionKey,
-      agentChannel: params.channelId,
-      agentAccountId: params.accountId,
-      agentTo: params.sessionId,
-      agentThreadId: params.sessionId,
-      requesterAgentIdOverride: params.requesterAgentId,
-    },
-  );
+  const agentId = params.agentId.trim();
+  const label = params.label?.trim() || agentId;
+  const childSessionKey = `agent:${agentId}:subagent:${randomUUID()}`;
+
+  bindChildSessionToParent(childSessionKey, params.parentSessionKey);
+  rememberSubagentDisplay(childSessionKey, { agentId, label });
+  getWriterForSessionOrChild(childSessionKey)?.({
+    type: "subagent_start",
+    agentId,
+    label,
+    childSessionKey,
+  });
+
+  try {
+    const runtime = getPushChannelRuntime();
+    const result = await runtime.subagent.run({
+      sessionKey: childSessionKey,
+      message: params.task,
+      deliver: false,
+      idempotencyKey: `push-channel:${params.sessionId}:${agentId}:${randomUUID()}`,
+    });
+    return {
+      status: "accepted" as const,
+      runId: result.runId,
+      childSessionKey,
+    };
+  } catch (error) {
+    clearChildSessionBinding(childSessionKey);
+    return {
+      status: "rejected" as const,
+      childSessionKey,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export const testing = {

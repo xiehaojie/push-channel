@@ -6,28 +6,44 @@ import {
 import {
   bindChildSessionToParent,
   clearChildSessionBinding,
+  getSubagentDisplayForChild,
   getParentSessionKeyForChild,
   getPushSessionTargetForSessionOrChild,
   getWriter,
   getWriterForSessionOrChild,
+  rememberSubagentDisplay,
   pushToolCallId,
   popToolCallId,
+  type SubagentDisplayInfo,
 } from "./src/tool-store.js";
 import { sendPushEvent } from "./src/send.js";
 import { getPushChannelRuntime } from "./src/runtime.js";
 import { createSubagentEventsFromMessages } from "./src/subagent-transcript-events.js";
 
-type SubagentDisplayInfo = {
-  agentId: string;
-  label: string;
-};
-
 type StreamingToolHookApi = Pick<OpenClawPluginApi, "on"> &
   Partial<Pick<OpenClawPluginApi, "runtime" | "lifecycle">>;
 
-const subagentDisplayByChildSessionKey = new Map<string, SubagentDisplayInfo>();
 const deliveredSubagentEventKeys = new Set<string>();
 const streamedSubagentTextByMessageKey = new Map<string, string>();
+
+function emitSubagentStreamChunks(params: {
+  childSessionKey: string;
+  display: SubagentDisplayInfo;
+  delta: string;
+  messageId?: string;
+}): void {
+  for (const chunk of Array.from(params.delta)) {
+    deliverSubagentEvent(params.childSessionKey, {
+      type: "subagent_stream",
+      agentId: params.display.agentId,
+      label: params.display.label,
+      childSessionKey: params.childSessionKey,
+      ...(params.messageId ? { messageId: params.messageId } : {}),
+      content: chunk,
+      delta: chunk,
+    });
+  }
+}
 
 function subagentEventKey(payload: Record<string, unknown>): string | undefined {
   const childSessionKey = typeof payload.childSessionKey === "string" ? payload.childSessionKey : "";
@@ -41,14 +57,20 @@ function subagentEventKey(payload: Record<string, unknown>): string | undefined 
       : typeof payload.messageId === "string"
         ? payload.messageId
         : undefined;
+  if (type === "subagent_start" || type === "subagent_end" || type === "subagent_error") {
+    return `${childSessionKey}:${type}`;
+  }
   return identity ? `${childSessionKey}:${type}:${identity}` : undefined;
 }
 
 function getSubagentDisplay(childSessionKey: string): SubagentDisplayInfo {
+  const parsedAgentId = childSessionKey.startsWith("agent:")
+    ? (childSessionKey.split(":")[1] ?? childSessionKey)
+    : (childSessionKey.split(":subagent:").pop() ?? childSessionKey);
   return (
-    subagentDisplayByChildSessionKey.get(childSessionKey) ?? {
-      agentId: childSessionKey.split(":subagent:").pop() ?? childSessionKey,
-      label: childSessionKey.split(":subagent:").pop() ?? childSessionKey,
+    getSubagentDisplayForChild(childSessionKey) ?? {
+      agentId: parsedAgentId,
+      label: parsedAgentId,
     }
   );
 }
@@ -136,14 +158,11 @@ function emitSubagentStreamDelta(update: {
   const previousText = streamedSubagentTextByMessageKey.get(messageKey) ?? "";
   if (!fullText.startsWith(previousText)) {
     streamedSubagentTextByMessageKey.set(messageKey, fullText);
-    deliverSubagentEvent(update.childSessionKey, {
-      type: "subagent_stream",
-      agentId: update.display.agentId,
-      label: update.display.label,
+    emitSubagentStreamChunks({
       childSessionKey: update.childSessionKey,
-      ...(update.messageId ? { messageId: update.messageId } : {}),
-      content: fullText,
+      display: update.display,
       delta: fullText,
+      messageId: update.messageId,
     });
     return;
   }
@@ -152,14 +171,11 @@ function emitSubagentStreamDelta(update: {
     return;
   }
   streamedSubagentTextByMessageKey.set(messageKey, fullText);
-  deliverSubagentEvent(update.childSessionKey, {
-    type: "subagent_stream",
-    agentId: update.display.agentId,
-    label: update.display.label,
+  emitSubagentStreamChunks({
     childSessionKey: update.childSessionKey,
-    ...(update.messageId ? { messageId: update.messageId } : {}),
-    content: delta,
+    display: update.display,
     delta,
+    messageId: update.messageId,
   });
 }
 
@@ -198,8 +214,11 @@ function emitSubagentStart(
   const childSessionKey =
     typeof event.childSessionKey === "string" ? event.childSessionKey : undefined;
   if (childSessionKey) {
-    subagentDisplayByChildSessionKey.set(childSessionKey, { agentId, label });
-    bindChildSessionToParent(childSessionKey, requesterSessionKey);
+    rememberSubagentDisplay(childSessionKey, { agentId, label });
+    const existingParentSessionKey = getParentSessionKeyForChild(childSessionKey);
+    if (!existingParentSessionKey || !getWriter(existingParentSessionKey)) {
+      bindChildSessionToParent(childSessionKey, requesterSessionKey);
+    }
   }
   const payload = {
     type: "subagent_start",
@@ -208,6 +227,9 @@ function emitSubagentStart(
     childSessionKey,
   };
   if (childSessionKey) {
+    if (hasDeliveredSubagentEvent(payload)) {
+      return;
+    }
     deliverSubagentEvent(childSessionKey, payload);
     return;
   }
@@ -373,19 +395,21 @@ export function registerStreamingToolHooks(api: StreamingToolHookApi): void {
     if (!requesterSessionKey && !getParentSessionKeyForChild(event.targetSessionKey)) {
       return;
     }
-    const display = subagentDisplayByChildSessionKey.get(event.targetSessionKey);
+    const display = getSubagentDisplayForChild(event.targetSessionKey);
     const subagentId =
       display?.agentId ?? event.targetSessionKey.split(":subagent:").pop() ?? event.targetSessionKey;
     const label = display?.label ?? subagentId;
-    subagentDisplayByChildSessionKey.delete(event.targetSessionKey);
     await replayChildTranscript(event.targetSessionKey, { agentId: subagentId, label });
-    deliverSubagentEvent(event.targetSessionKey, {
+    const endPayload = {
       type: "subagent_end",
       agentId: subagentId,
       label,
       childSessionKey: event.targetSessionKey,
       status: event.outcome === "ok" || event.reason === "subagent-complete" ? "success" : (event.outcome ?? event.reason),
-    });
+    };
+    if (!hasDeliveredSubagentEvent(endPayload)) {
+      deliverSubagentEvent(event.targetSessionKey, endPayload);
+    }
     clearDeliveredSubagentEvents(event.targetSessionKey);
     clearChildSessionBinding(event.targetSessionKey);
   });

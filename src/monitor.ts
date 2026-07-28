@@ -695,6 +695,23 @@ async function dispatchMentionedSubagents(params: {
       }
 
       const content = await readMentionedSubagentResultText(params.core, result.childSessionKey);
+      if (content) {
+        emitMentionSubagentEvent(params, {
+          type: "subagent_result",
+          agentId: mention.agentId,
+          label,
+          childSessionKey: result.childSessionKey,
+          content,
+          status: "success",
+        });
+      }
+      emitMentionSubagentEvent(params, {
+        type: "subagent_end",
+        agentId: mention.agentId,
+        label,
+        childSessionKey: result.childSessionKey,
+        status: "success",
+      });
       return {
         agentId: mention.agentId,
         label,

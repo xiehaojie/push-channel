@@ -1,18 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
+import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { spawnMentionedSubagent } from "./subagent-orchestrator.js";
-import { spawnSubagentDirect } from "../../../src/agents/subagent-spawn.js";
-
-vi.mock("../../../src/agents/subagent-spawn.js", () => ({
-  spawnSubagentDirect: vi.fn(async () => ({
-    status: "accepted",
-    runId: "run-1",
-    childSessionKey: "agent:researcher:subagent:child",
-  })),
-}));
+import { setPushChannelRuntime } from "./runtime.js";
 
 describe("push-channel mentioned subagent orchestration", () => {
-  it("disables native completion wake so push-channel resumes the main agent after collecting results", async () => {
-    await spawnMentionedSubagent({
+  it("runs mentioned agents through the plugin runtime subagent API", async () => {
+    const run = vi.fn(async () => ({ runId: "run-1" }));
+    setPushChannelRuntime({
+      subagent: {
+        run,
+      },
+    } as unknown as PluginRuntime);
+
+    const result = await spawnMentionedSubagent({
       task: "please research this",
       agentId: "researcher",
       label: "Researcher",
@@ -23,23 +23,18 @@ describe("push-channel mentioned subagent orchestration", () => {
       requesterAgentId: "main",
     });
 
-    expect(spawnSubagentDirect).toHaveBeenCalledWith(
+    expect(result).toEqual(
       expect.objectContaining({
-        task: "please research this",
-        agentId: "researcher",
-        mode: "run",
-        context: "isolated",
-        expectsCompletionMessage: false,
-      }),
-      expect.objectContaining({
-        agentSessionKey: "agent:main:channel:push-channel:direct:session-1",
-        completionOwnerKey: "agent:main:channel:push-channel:direct:session-1",
-        agentChannel: "push-channel",
-        agentAccountId: "default",
-        agentTo: "session-1",
-        agentThreadId: "session-1",
-        requesterAgentIdOverride: "main",
+        status: "accepted",
+        runId: "run-1",
+        childSessionKey: expect.stringMatching(/^agent:researcher:subagent:/),
       }),
     );
+    expect(run).toHaveBeenCalledWith({
+      sessionKey: result.childSessionKey,
+      message: "please research this",
+      deliver: false,
+      idempotencyKey: expect.stringMatching(/^push-channel:session-1:researcher:/),
+    });
   });
 });

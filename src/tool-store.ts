@@ -14,11 +14,17 @@ export type PushSessionTarget = {
   sessionId?: string;
 };
 
+export type SubagentDisplayInfo = {
+  agentId: string;
+  label: string;
+};
+
 type PushChannelToolStoreState = {
   writerStore: Map<string, SseWriter>;
   pendingStacks: Map<string, string[]>;
   childParentSessions: Map<string, string>;
   pushSessionTargets: Map<string, PushSessionTarget>;
+  subagentDisplays: Map<string, SubagentDisplayInfo>;
 };
 
 const PUSH_CHANNEL_TOOL_STORE_KEY = Symbol.for("openclaw.pushChannel.toolStore");
@@ -30,6 +36,7 @@ function getToolStoreState(): PushChannelToolStoreState {
     const state = existing as Partial<PushChannelToolStoreState>;
     state.childParentSessions ??= new Map<string, string>();
     state.pushSessionTargets ??= new Map<string, PushSessionTarget>();
+    state.subagentDisplays ??= new Map<string, SubagentDisplayInfo>();
     return state as PushChannelToolStoreState;
   }
   const created: PushChannelToolStoreState = {
@@ -37,6 +44,7 @@ function getToolStoreState(): PushChannelToolStoreState {
     pendingStacks: new Map<string, string[]>(),
     childParentSessions: new Map<string, string>(),
     pushSessionTargets: new Map<string, PushSessionTarget>(),
+    subagentDisplays: new Map<string, SubagentDisplayInfo>(),
   };
   globalStore[PUSH_CHANNEL_TOOL_STORE_KEY] = created;
   return created;
@@ -47,6 +55,7 @@ const writerStore = state.writerStore;
 const pendingStacks = state.pendingStacks;
 const childParentSessions = state.childParentSessions;
 const pushSessionTargets = state.pushSessionTargets;
+const subagentDisplays = state.subagentDisplays;
 
 // --- SSE writer ---
 
@@ -68,6 +77,22 @@ export function getWriterForSessionOrChild(sessionKey: string): SseWriter | unde
 
 export function bindChildSessionToParent(childSessionKey: string, parentSessionKey: string): void {
   childParentSessions.set(childSessionKey, parentSessionKey);
+}
+
+export function rememberSubagentDisplay(
+  childSessionKey: string,
+  display: SubagentDisplayInfo,
+): void {
+  if (!childSessionKey || !display.agentId) {
+    return;
+  }
+  subagentDisplays.set(childSessionKey, display);
+}
+
+export function getSubagentDisplayForChild(
+  childSessionKey: string,
+): SubagentDisplayInfo | undefined {
+  return subagentDisplays.get(childSessionKey);
 }
 
 export function rememberPushSessionTarget(
@@ -92,6 +117,7 @@ export function getPushSessionTargetForSessionOrChild(
 export function clearChildSessionBinding(childSessionKey: string): void {
   childParentSessions.delete(childSessionKey);
   pendingStacks.delete(childSessionKey);
+  subagentDisplays.delete(childSessionKey);
 }
 
 export function clearWriter(sessionKey: string): void {

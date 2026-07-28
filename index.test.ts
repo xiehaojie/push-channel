@@ -46,6 +46,7 @@ describe("push-channel subagent hook streaming", () => {
             enabled: true,
             listenPort: 18080,
             listenPath: "/push-channel",
+            middlewareUrl: "http://push-middleware.local",
           },
         },
         payload: {
@@ -63,6 +64,35 @@ describe("push-channel subagent hook streaming", () => {
         runId: "run-1",
         timeoutMs: monitorTesting.MENTION_SUBAGENT_WAIT_TIMEOUT_MS,
       });
+      expect(sendPushEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          middlewareUrl: "http://push-middleware.local",
+          agentId: "main",
+          sessionId: "session-1",
+          event: expect.objectContaining({
+            type: "subagent_result",
+            agentId: "researcher",
+            label: "Researcher",
+            childSessionKey: "agent:researcher:subagent:child",
+            content: "完成了",
+            status: "success",
+          }),
+        }),
+      );
+      expect(sendPushEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          middlewareUrl: "http://push-middleware.local",
+          agentId: "main",
+          sessionId: "session-1",
+          event: expect.objectContaining({
+            type: "subagent_end",
+            agentId: "researcher",
+            label: "Researcher",
+            childSessionKey: "agent:researcher:subagent:child",
+            status: "success",
+          }),
+        }),
+      );
       expect(monitorTesting.MENTION_SUBAGENT_WAIT_TIMEOUT_MS).toBe(5 * 60 * 1000);
     } finally {
       subagentOrchestratorTesting.setSpawnMentionedSubagentImplForTest();
@@ -82,6 +112,16 @@ describe("push-channel subagent hook streaming", () => {
 
     try {
       registerStreamingToolHooks(api as never);
+      handlers.get("subagent_spawned")?.(
+        {
+          agentId: "researcher",
+          label: "Researcher",
+          childSessionKey: "agent:researcher:subagent:child",
+        },
+        {
+          requesterSessionKey,
+        },
+      );
       handlers.get("subagent_spawned")?.(
         {
           agentId: "researcher",
@@ -358,8 +398,8 @@ describe("push-channel subagent hook streaming", () => {
           label: "Researcher",
           childSessionKey,
           messageId: "assistant-live-1",
-          content: "我开始",
-          delta: "我开始",
+          content: "我",
+          delta: "我",
         },
         {
           type: "subagent_stream",
@@ -367,8 +407,53 @@ describe("push-channel subagent hook streaming", () => {
           label: "Researcher",
           childSessionKey,
           messageId: "assistant-live-1",
-          content: "查资料。",
-          delta: "查资料。",
+          content: "开",
+          delta: "开",
+        },
+        {
+          type: "subagent_stream",
+          agentId: "researcher",
+          label: "Researcher",
+          childSessionKey,
+          messageId: "assistant-live-1",
+          content: "始",
+          delta: "始",
+        },
+        {
+          type: "subagent_stream",
+          agentId: "researcher",
+          label: "Researcher",
+          childSessionKey,
+          messageId: "assistant-live-1",
+          content: "查",
+          delta: "查",
+        },
+        {
+          type: "subagent_stream",
+          agentId: "researcher",
+          label: "Researcher",
+          childSessionKey,
+          messageId: "assistant-live-1",
+          content: "资",
+          delta: "资",
+        },
+        {
+          type: "subagent_stream",
+          agentId: "researcher",
+          label: "Researcher",
+          childSessionKey,
+          messageId: "assistant-live-1",
+          content: "料",
+          delta: "料",
+        },
+        {
+          type: "subagent_stream",
+          agentId: "researcher",
+          label: "Researcher",
+          childSessionKey,
+          messageId: "assistant-live-1",
+          content: "。",
+          delta: "。",
         },
         {
           type: "subagent_tool_call",
