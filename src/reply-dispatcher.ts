@@ -1,15 +1,34 @@
 import type { ServerResponse } from "node:http";
-import { getPushChannelRuntime } from "./runtime.js";
 import { sendPushMessage } from "./send.js";
-import { setWriter, clearWriter } from "./tool-store.js";
+import { setWriter, clearWriter, rememberPushSessionTarget } from "./tool-store.js";
 
 const REQUEST_TIMEOUT_HINT = "Request timed out before a response was generated";
+
+type ReplyTextPayload = {
+  text?: unknown;
+  content?: unknown;
+};
 
 function isTimeoutFinalReply(text: string): boolean {
   return text.includes(REQUEST_TIMEOUT_HINT);
 }
 
-export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?: string) {
+function resolvePayloadText(payload: ReplyTextPayload): string {
+  if (typeof payload.text === "string") {
+    return payload.text;
+  }
+  return typeof payload.content === "string" ? payload.content : "";
+}
+
+export function createStreamingReplyDispatcher(
+  res: ServerResponse,
+  sessionKey?: string,
+  pushTarget?: {
+    middlewareUrl?: string;
+    agentId: string;
+    sessionId?: string;
+  },
+) {
   // Send initial headers
   if (!res.headersSent) {
     res.writeHead(200, {
@@ -55,10 +74,17 @@ export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?:
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       }
     });
+    if (pushTarget?.middlewareUrl) {
+      rememberPushSessionTarget(sessionKey, {
+        middlewareUrl: pushTarget.middlewareUrl,
+        agentId: pushTarget.agentId,
+        sessionId: pushTarget.sessionId,
+      });
+    }
   }
 
-  const onPartialReply = (payload: any) => {
-    const fullText = payload.text || "";
+  const onPartialReply = (payload: ReplyTextPayload) => {
+    const fullText = typeof payload.text === "string" ? payload.text : "";
     if (!res.writableEnded && fullText.length > previousTextLength) {
       const delta = fullText.slice(previousTextLength);
       previousTextLength = fullText.length;
@@ -74,25 +100,25 @@ export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?:
       hasStreamedContent = false;
       return true;
     },
-    sendBlockReply: (payload: any) => {
+    sendBlockReply: (payload: ReplyTextPayload) => {
       if (res.writableEnded) return false;
       // Skip content if already streamed token-by-token via onPartialReply
       if (!hasStreamedContent) {
-        const text = payload.text || payload.content || "";
+        const text = resolvePayloadText(payload);
         if (text) {
           res.write(`data: ${JSON.stringify({ type: "content", delta: text })}\n\n`);
         }
       }
-      
+
       // Reset for the next block
       previousTextLength = 0;
       hasStreamedContent = false;
-      
+
       return true;
     },
-    sendFinalReply: (payload: any) => {
+    sendFinalReply: (payload: ReplyTextPayload) => {
       if (res.writableEnded) return false;
-      const text = payload.text || payload.content || "";
+      const text = resolvePayloadText(payload);
       const timeoutFinal = typeof text === "string" && isTimeoutFinalReply(text);
       if (timeoutFinal) {
         // Timeout final replies usually mean tool work may still be running.
@@ -105,7 +131,7 @@ export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?:
       } else {
         emitToolEnd();
       }
-      // Skip content if already streamed token-by-token via onPartialReply
+      // Skip content if already streamed token-by-token via onPartialReply.
       if (!hasStreamedContent) {
         if (!timeoutFinal && text) {
           res.write(`data: ${JSON.stringify({ type: "content", delta: text })}\n\n`);
@@ -118,6 +144,7 @@ export function createStreamingReplyDispatcher(res: ServerResponse, sessionKey?:
     },
     waitForIdle: async () => {},
     getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
+    getFailedCounts: () => ({ tool: 0, block: 0, final: 0 }),
     markComplete: () => {
       emitToolEnd();
       if (sessionKey) clearWriter(sessionKey);
@@ -133,22 +160,21 @@ export function createPushChannelReplyDispatcher(params: {
   sessionId?: string;
 }) {
   const { middlewareUrl, agentId, sessionId } = params;
-  const runtime = getPushChannelRuntime();
-
   return {
     sendToolResult: () => true,
     sendBlockReply: () => true,
-    sendFinalReply: (payload: any) => {
-      const text = payload.text || payload.content || "";
+    sendFinalReply: (payload: ReplyTextPayload) => {
+      const text = resolvePayloadText(payload);
       if (text) {
         sendPushMessage({ middlewareUrl, agentId, sessionId, content: text }).catch((err) => {
-          runtime.log?.(`Failed to send reply to ${agentId}: ${err}`);
+          console.warn(`Failed to send reply to ${agentId}: ${err}`);
         });
       }
       return true;
     },
     waitForIdle: async () => {},
     getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
+    getFailedCounts: () => ({ tool: 0, block: 0, final: 0 }),
     markComplete: () => {},
   };
 }

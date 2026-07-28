@@ -24,7 +24,8 @@ const server = http.createServer(app.callback());
 initWebSocket(server);
 
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '127.0.0.1';
 
-server.listen(PORT, () => {
-    console.log(`Admin backend listening on port ${PORT}`);
+server.listen(PORT, HOST, () => {
+    console.log(`Admin backend listening on http://${HOST}:${PORT}`);
 });

@@ -10,6 +10,12 @@
     "extensions": [
       "./index.ts"
     ],
+    "compat": {
+      "pluginApi": ">=2026.5.20"
+    },
+    "build": {
+      "openclawVersion": "2026.5.20"
+    },
     "channel": {
       "id": "push-channel",
       "label": "Push Channel",

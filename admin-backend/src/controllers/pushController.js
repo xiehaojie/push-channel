@@ -1,4 +1,31 @@
-const { connections } = require('../websocket/index');
+const { connections, broadcastToSession } = require('../websocket/index');
+const streamCounters = new Map();
+
+function nextAnswerMessageId(agentId, sessionId) {
+    const key = `${agentId}:${sessionId}`;
+    const next = (streamCounters.get(key) || 0) + 1;
+    streamCounters.set(key, next);
+    return `push-${key}-${next}`;
+}
+
+function resolveDeliveryAgentId(agentId, sessionId) {
+    if (connections.has(agentId)) {
+        return agentId;
+    }
+    if (!sessionId) {
+        return agentId;
+    }
+
+    for (const [candidateAgentId, sockets] of connections.entries()) {
+        for (const socket of sockets) {
+            if (socket.sessionIds?.has(sessionId)) {
+                return candidateAgentId;
+            }
+        }
+    }
+
+    return agentId;
+}
 
 class PushController {
     async send(ctx) {
@@ -8,29 +35,70 @@ class PushController {
         const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : '';
         const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
         const content = body.content;
+        const event = body.event && typeof body.event === 'object' && !Array.isArray(body.event)
+            ? body.event
+            : null;
 
-        if (!agentId || !content) {
+        if (!agentId || (!content && !event)) {
             ctx.status = 400;
-            ctx.body = "Missing agentId or content";
+            ctx.body = "Missing agentId or content/event";
             return;
         }
 
-        const socket = connections.get(agentId);
-        if (socket) {
+        const deliveryAgentId = resolveDeliveryAgentId(agentId, sessionId);
+        if (deliveryAgentId !== agentId) {
+            console.log(
+                `Resolved push request agent ${agentId} to active session owner ${deliveryAgentId} for session ${sessionId}`,
+            );
+        }
+
+        const sockets = connections.get(deliveryAgentId);
+        if (sockets && sockets.size > 0) {
+            if (event) {
+                if (typeof event.type !== 'string' || !event.type.trim()) {
+                    ctx.status = 400;
+                    ctx.body = "Invalid event";
+                    return;
+                }
+                broadcastToSession(deliveryAgentId, sessionId, {
+                    ...event,
+                    sessionId: sessionId || event.sessionId,
+                });
+                ctx.status = 200;
+                ctx.body = "Sent";
+                return;
+            }
+
             const chunkSize = 5;
             const delay = 50;
+            const answerMessageId = nextAnswerMessageId(deliveryAgentId, sessionId || deliveryAgentId);
 
             const streamLoop = async () => {
-                socket.send(JSON.stringify({ type: "stream_start", from: 'Assistant', sessionId }));
+                broadcastToSession(deliveryAgentId, sessionId, {
+                    type: "stream_start",
+                    from: 'Assistant',
+                    sessionId,
+                    answerMessageId
+                });
 
                 let currentIndex = 0;
                 while (currentIndex < content.length) {
                     const chunk = content.slice(currentIndex, currentIndex + chunkSize);
-                    socket.send(JSON.stringify({ type: "stream", content: chunk, role: 'assistant', sessionId }));
+                    broadcastToSession(deliveryAgentId, sessionId, {
+                        type: "stream",
+                        content: chunk,
+                        role: 'assistant',
+                        sessionId,
+                        answerMessageId
+                    });
                     currentIndex += chunkSize;
                     await new Promise(r => setTimeout(r, delay));
                 }
-                socket.send(JSON.stringify({ type: "stream_end", sessionId }));
+                broadcastToSession(deliveryAgentId, sessionId, {
+                    type: "stream_end",
+                    sessionId,
+                    answerMessageId
+                });
             };
             
             streamLoop().catch(err => console.error("Streaming failed", err));
@@ -38,7 +106,7 @@ class PushController {
             ctx.status = 200;
             ctx.body = "Sent";
         } else {
-            console.log(`Agent ${agentId} not found`);
+            console.log(`Agent ${agentId} not found for session ${sessionId || '<none>'}`);
             ctx.status = 404;
             ctx.body = "Agent not found";
         }

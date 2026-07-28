@@ -40,8 +40,7 @@ class AuthController {
     }
 
     async session(ctx) {
-        // Handled by auth middleware, if we reach here, session is valid
-        ctx.body = success({ user: ctx.state.user });
+        ctx.body = success({ user: ctx.state.user || null, demoAuthDisabled: true });
     }
 
     async logout(ctx) {

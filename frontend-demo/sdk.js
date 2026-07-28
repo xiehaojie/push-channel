@@ -1,17 +1,29 @@
 class PushChannelSDK {
-  constructor(url, agentId) {
+  constructor(url, agentId, options = {}) {
     this.url = url;
     this.agentId = agentId;
+    this.sessionId = options.sessionId || "";
     this.socket = null;
     this.callbacks = {
       message: null,
+      messageSent: null,
+      registered: null,
       streamStart: null,
       streamChunk: null,
+      streamSnapshot: null,
       streamEnd: null,
       toolStart: null,
       toolEnd: null,
       toolCall: null,
       toolResult: null,
+      subagentStart: null,
+      subagentMessage: null,
+      subagentStream: null,
+      subagentToolCall: null,
+      subagentToolResult: null,
+      subagentResult: null,
+      subagentError: null,
+      subagentEnd: null,
       timeoutDeferred: null,
       error: null,
       close: null,
@@ -25,7 +37,13 @@ class PushChannelSDK {
 
     this.socket.onopen = () => {
       console.log("Connected to server");
-      this.socket.send(JSON.stringify({ type: "register", agentId: this.agentId }));
+      this.socket.send(
+        JSON.stringify({
+          type: "register",
+          agentId: this.agentId,
+          sessionId: this.sessionId,
+        }),
+      );
 
       this.pingInterval = setInterval(() => {
         if (this.socket.readyState === WebSocket.OPEN) {
@@ -42,26 +60,50 @@ class PushChannelSDK {
           return;
         }
 
-        if (data.type === "stream_start" && this.callbacks.streamStart) {
-          this.callbacks.streamStart(data.from);
+        if (data.type === "registered" && this.callbacks.registered) {
+          this.callbacks.registered(data);
+        } else if (data.type === "message_sent" && this.callbacks.messageSent) {
+          this.callbacks.messageSent(data);
+        } else if (data.type === "stream_start" && this.callbacks.streamStart) {
+          this.callbacks.streamStart(data);
         } else if (data.type === "stream" && this.callbacks.streamChunk) {
-          this.callbacks.streamChunk(data.content);
+          this.callbacks.streamChunk(data);
+        } else if (data.type === "stream_snapshot" && this.callbacks.streamSnapshot) {
+          this.callbacks.streamSnapshot(data);
         } else if (data.type === "stream_end" && this.callbacks.streamEnd) {
-          this.callbacks.streamEnd();
+          this.callbacks.streamEnd(data);
         } else if (data.type === "tool_call" && this.callbacks.toolCall) {
-          this.callbacks.toolCall(data.toolCallId, data.toolName, data.args);
+          this.callbacks.toolCall(data);
         } else if (data.type === "tool_result" && this.callbacks.toolResult) {
-          this.callbacks.toolResult(data.toolCallId);
+          this.callbacks.toolResult(data);
         } else if (data.type === "tool_start" && this.callbacks.toolStart) {
-          this.callbacks.toolStart();
+          this.callbacks.toolStart(data);
         } else if (data.type === "tool_end" && this.callbacks.toolEnd) {
-          this.callbacks.toolEnd();
+          this.callbacks.toolEnd(data);
+        } else if (data.type === "subagent_start" && this.callbacks.subagentStart) {
+          this.callbacks.subagentStart(data);
+        } else if (data.type === "subagent_message" && this.callbacks.subagentMessage) {
+          this.callbacks.subagentMessage(data);
+        } else if (data.type === "subagent_stream" && this.callbacks.subagentStream) {
+          this.callbacks.subagentStream(data);
+        } else if (data.type === "subagent_tool_call" && this.callbacks.subagentToolCall) {
+          this.callbacks.subagentToolCall(data);
+        } else if (data.type === "subagent_tool_result" && this.callbacks.subagentToolResult) {
+          this.callbacks.subagentToolResult(data);
+        } else if (data.type === "subagent_result" && this.callbacks.subagentResult) {
+          this.callbacks.subagentResult(data);
+        } else if (data.type === "subagent_error" && this.callbacks.subagentError) {
+          this.callbacks.subagentError(data);
+        } else if (data.type === "subagent_end" && this.callbacks.subagentEnd) {
+          this.callbacks.subagentEnd(data);
         } else if (data.type === "timeout_deferred" && this.callbacks.timeoutDeferred) {
-          this.callbacks.timeoutDeferred(data.message);
+          this.callbacks.timeoutDeferred(data);
         } else if (data.type === "message" && this.callbacks.message) {
-          this.callbacks.message(data.content);
+          this.callbacks.message(data);
+        } else if (data.type === "error" && this.callbacks.error) {
+          this.callbacks.error(data);
         } else if (data.type === "done" && this.callbacks.streamEnd) {
-          this.callbacks.streamEnd();
+          this.callbacks.streamEnd(data);
         }
       } catch (err) {
         console.error("Error parsing message", err);
@@ -80,9 +122,9 @@ class PushChannelSDK {
     };
   }
 
-  sendMessage(content, sessionId) {
+  sendMessage(content, sessionId, metadata = {}) {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      const payload = { type: "message", content };
+      const payload = { type: "message", content, ...metadata };
       if (sessionId) {
         payload.sessionId = sessionId;
       }
@@ -105,12 +147,24 @@ class PushChannelSDK {
     this.callbacks.message = callback;
   }
 
+  onMessageSent(callback) {
+    this.callbacks.messageSent = callback;
+  }
+
+  onRegistered(callback) {
+    this.callbacks.registered = callback;
+  }
+
   onStreamStart(callback) {
     this.callbacks.streamStart = callback;
   }
 
   onStreamChunk(callback) {
     this.callbacks.streamChunk = callback;
+  }
+
+  onStreamSnapshot(callback) {
+    this.callbacks.streamSnapshot = callback;
   }
 
   onStreamEnd(callback) {
@@ -131,6 +185,38 @@ class PushChannelSDK {
 
   onToolResult(callback) {
     this.callbacks.toolResult = callback;
+  }
+
+  onSubagentStart(callback) {
+    this.callbacks.subagentStart = callback;
+  }
+
+  onSubagentMessage(callback) {
+    this.callbacks.subagentMessage = callback;
+  }
+
+  onSubagentStream(callback) {
+    this.callbacks.subagentStream = callback;
+  }
+
+  onSubagentToolCall(callback) {
+    this.callbacks.subagentToolCall = callback;
+  }
+
+  onSubagentToolResult(callback) {
+    this.callbacks.subagentToolResult = callback;
+  }
+
+  onSubagentResult(callback) {
+    this.callbacks.subagentResult = callback;
+  }
+
+  onSubagentError(callback) {
+    this.callbacks.subagentError = callback;
+  }
+
+  onSubagentEnd(callback) {
+    this.callbacks.subagentEnd = callback;
   }
 
   onTimeoutDeferred(callback) {

@@ -1,11 +1,24 @@
-
-import type { ChannelPlugin, ChannelMeta } from "openclaw/plugin-sdk";
-import type { ResolvedPushChannelAccount } from "./types.js";
-import { pushChannelOutbound } from "./outbound.js";
+import type {
+  ChannelGatewayContext,
+  ChannelMeta,
+  ChannelStatusAdapter,
+} from "openclaw/plugin-sdk/channel-contract";
+import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import {
+  DEFAULT_PUSH_CHANNEL_ACCOUNT_ID,
+  PUSH_CHANNEL_ID,
+  deletePushChannelConfig,
+  pushChannelConfigSchema,
+  resolvePushChannelAccount,
+  setPushChannelEnabled,
+} from "./config.js";
 import { monitorPushChannel } from "./monitor.js";
+import { pushChannelOutbound } from "./outbound.js";
+import type { ResolvedPushChannelAccount } from "./types.js";
 
 const meta: ChannelMeta = {
-  id: "push-channel",
+  id: PUSH_CHANNEL_ID,
   label: "Push Channel",
   selectionLabel: "Push Channel (Custom)",
   docsPath: "/channels/push-channel",
@@ -14,11 +27,45 @@ const meta: ChannelMeta = {
   order: 99,
 };
 
-export const pushChannelPlugin: ChannelPlugin<ResolvedPushChannelAccount> = {
-  id: "push-channel",
+const pushChannelMessageAdapter = createChannelMessageAdapterFromOutbound({
+  id: PUSH_CHANNEL_ID,
+  outbound: pushChannelOutbound,
+});
+
+type PushChannelProbe = {
+  status: "ok" | "not_configured";
+  error: string | null;
+};
+
+const pushChannelStatus = {
+  defaultRuntime: {
+    accountId: DEFAULT_PUSH_CHANNEL_ACCOUNT_ID,
+    running: false,
+    port: null,
+  },
+  buildChannelSummary: ({ snapshot }) => ({
+    status: snapshot.running ? "running" : "idle",
+    port: snapshot.port ?? null,
+  }),
+  probeAccount: async ({ account }) => ({
+    status: account.configured ? "ok" : "not_configured",
+    error: account.configured ? null : "middlewareUrl not configured",
+  }),
+  buildAccountSnapshot: (ctx) => ({
+    accountId: ctx.account.accountId,
+    name: ctx.account.name,
+    enabled: ctx.account.enabled,
+    configured: ctx.account.configured,
+    running: ctx.runtime?.running ?? false,
+    port: ctx.runtime?.port ?? ctx.account.config.listenPort,
+  }),
+} satisfies ChannelStatusAdapter<ResolvedPushChannelAccount, PushChannelProbe>;
+
+export const pushChannelPlugin = {
+  id: PUSH_CHANNEL_ID,
   meta,
   capabilities: {
-    chatTypes: ["direct"], 
+    chatTypes: ["direct"],
     media: false,
     threads: false,
     polls: false,
@@ -26,58 +73,43 @@ export const pushChannelPlugin: ChannelPlugin<ResolvedPushChannelAccount> = {
     edit: false,
     reply: false,
   },
-  configSchema: {
-      schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-              enabled: { type: "boolean" },
-              middlewareUrl: { type: "string" },
-              listenPort: { type: "integer" },
-              listenPath: { type: "string" },
-          }
-      }
-  },
+  reload: { configPrefixes: [`channels.${PUSH_CHANNEL_ID}`] },
+  configSchema: pushChannelConfigSchema,
   config: {
-    listAccountIds: () => ["default"],
-    resolveAccount: (cfg, accountId) => {
-        const c = (cfg.channels?.["push-channel"] as any) || {};
-        const account = {
-            accountId: "default",
-            enabled: c.enabled ?? false,
-            configured: !!c.middlewareUrl,
-            name: "Push Channel",
-            config: c,
-        };
-        return account;
-    },
-    defaultAccountId: () => "default",
-    setAccountEnabled: () => { throw new Error("Not implemented"); },
-    deleteAccount: () => { throw new Error("Not implemented"); },
-    isConfigured: (acc) => acc.configured,
-    describeAccount: (acc) => ({ accountId: acc.accountId, enabled: acc.enabled, configured: acc.configured }),
+    listAccountIds: (_cfg: OpenClawConfig) => [DEFAULT_PUSH_CHANNEL_ACCOUNT_ID],
+    resolveAccount: (cfg: OpenClawConfig, accountId?: string | null) =>
+      resolvePushChannelAccount(cfg, accountId ?? DEFAULT_PUSH_CHANNEL_ACCOUNT_ID),
+    defaultAccountId: (_cfg: OpenClawConfig) => DEFAULT_PUSH_CHANNEL_ACCOUNT_ID,
+    setAccountEnabled: (params: { cfg: OpenClawConfig; accountId: string; enabled: boolean }) =>
+      setPushChannelEnabled(params.cfg, params.enabled),
+    deleteAccount: (params: { cfg: OpenClawConfig; accountId: string }) =>
+      deletePushChannelConfig(params.cfg),
+    isConfigured: (acc: ResolvedPushChannelAccount) => acc.configured,
+    isEnabled: (acc: ResolvedPushChannelAccount) => acc.enabled,
+    describeAccount: (acc: ResolvedPushChannelAccount) => ({
+      accountId: acc.accountId,
+      name: acc.name,
+      enabled: acc.enabled,
+      configured: acc.configured,
+    }),
   },
   outbound: pushChannelOutbound,
-  gateway: {
-      startAccount: async (ctx) => {
-          return monitorPushChannel({
-              config: ctx.cfg,
-              runtime: ctx.runtime,
-              accountId: ctx.accountId,
-              abortSignal: ctx.abortSignal
-          });
-      }
+  messaging: {
+    targetResolver: {
+      looksLikeId: () => true,
+    },
   },
-  status: {
-      defaultRuntime: { port: null }, 
-      buildChannelSummary: () => ({ status: "ok" }),
-      probeAccount: async () => ({ status: "ok", error: null }),
-      buildAccountSnapshot: (ctx) => ({ 
-          accountId: ctx.account.accountId, 
-          enabled: ctx.account.enabled, 
-          configured: ctx.account.configured,
-          status: "ok",
-          port: ctx.runtime?.port ?? null
-      }),
-  }
+  message: pushChannelMessageAdapter,
+  gateway: {
+    startAccount: async (ctx: ChannelGatewayContext<ResolvedPushChannelAccount>) => {
+      return monitorPushChannel({
+        config: ctx.cfg,
+        runtime: ctx.runtime,
+        accountId: ctx.accountId,
+        abortSignal: ctx.abortSignal,
+        setStatus: ctx.setStatus,
+      });
+    },
+  },
+  status: pushChannelStatus,
 };
